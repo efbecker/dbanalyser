@@ -1,0 +1,7 @@
+# Fallback caso AllowOverride esteja ativo; o VirtualHost em deploy/apache já faz isso.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L,QSA]
+</IfModule>
+Options -Indexes

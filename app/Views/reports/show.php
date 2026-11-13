@@ -1,0 +1,136 @@
+<?php
+use App\Core\{Markdown, View};
+$byCat = fn(array $cats) => array_values(array_filter($findings, fn($f) => in_array($f['category'], $cats, true)));
+$sev = array_count_values(array_column($findings, 'severity'));
+$score = (int) $a['score'];
+$scoreClass = $score >= 80 ? 'good' : ($score >= 50 ? 'warn' : 'bad');
+$tables = $m['schemas']['tables'] ?? [];
+$verdictClass = ['adequado' => 'good', 'superdimensionado' => 'warn', 'mal tunado' => 'warn', 'subdimensionado' => 'bad'][$tuning['verdict'] ?? ''] ?? 'muted';
+$sqlAll = implode("\n\n", array_filter(array_column($findings, 'fix_sql')));
+?>
+<?php if ($a['status'] === 'failed'): ?><div class="alert alert-error">Análise falhou: <?= e($a['error']) ?></div><?php endif; ?>
+<div class="report-head card">
+  <div class="gauge gauge-<?= $scoreClass ?>" style="--score:<?= $score ?>"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="g-bg"/><circle cx="60" cy="60" r="52" class="g-fg" pathLength="100" style="stroke-dasharray:<?= $score ?> 100"/></svg><div class="g-val"><?= $score ?><small>/100</small></div></div>
+  <div class="report-meta">
+    <h2><span class="engine engine-<?= e($a['engine']) ?>"><?= e($a['engine']) ?></span> <?= e($a['database_name']) ?> <span class="muted">@ <?= e($a['host'] . ':' . $a['port']) ?></span></h2>
+    <p class="muted small"><?= e($a['server_version']) ?></p>
+    <p class="small">Analisado por <strong><?= e($a['username']) ?></strong> em <?= e($a['started_at']) ?> UTC
+      <?php if ($a['ai_model']): ?> · IA: <code><?= e($a['ai_provider'] . ' / ' . $a['ai_model']) ?></code><?php endif; ?></p>
+    <div class="sev-row">
+      <?php foreach (['critical' => 'Críticos', 'high' => 'Altos', 'medium' => 'Médios', 'low' => 'Baixos'] as $k => $l): ?>
+        <span class="sev sev-<?= $k ?>"><?= (int) ($sev[$k] ?? 0) ?> <?= $l ?></span>
+      <?php endforeach; ?>
+      <span class="verdict verdict-<?= $verdictClass ?>">Servidor: <?= e(mb_strtoupper($tuning['verdict'] ?? 'n/d')) ?></span>
+    </div>
+  </div>
+  <div class="report-actions">
+    <a class="btn btn-ghost btn-sm" href="<?= e(url("/reports/{$a['id']}/export/pdf")) ?>" target="_blank">PDF</a>
+    <a class="btn btn-ghost btn-sm" href="<?= e(url("/reports/{$a['id']}/export/html")) ?>">HTML</a>
+    <a class="btn btn-ghost btn-sm" href="<?= e(url("/reports/{$a['id']}/export/md")) ?>">Markdown</a>
+    <?php if ($prev): ?><a class="btn btn-edit btn-sm" href="<?= e(url("/reports/compare?a={$prev['id']}&b={$a['id']}")) ?>">⇄ Comparar com #<?= (int) $prev['id'] ?></a><?php endif; ?>
+    <form method="post" action="<?= e(url("/reports/{$a['id']}/delete")) ?>" class="inline" data-confirm="Excluir este laudo?"><?= csrf_field() ?><button class="btn btn-danger btn-sm">Excluir</button></form>
+  </div>
+</div>
+
+<div class="tabs" data-tabs>
+  <nav class="tab-nav">
+    <button data-tab="sum" class="active">Resumo Executivo</button>
+    <button data-tab="tables">Tabelas &amp; Relacionamentos</button>
+    <button data-tab="idx">Índices</button>
+    <button data-tab="q">Queries &amp; Performance</button>
+    <button data-tab="tune">Dimensionamento &amp; Tuning</button>
+    <button data-tab="sql">Scripts SQL</button>
+  </nav>
+
+  <section class="card tab-pane active" data-pane="sum">
+    <?php if ($a['ai_report_md']): ?>
+      <div class="md"><?= Markdown::render($a['ai_report_md']) ?></div>
+    <?php else: ?>
+      <p class="muted">Sem laudo de IA (nenhum provedor configurado ou falha na chamada). Achados determinísticos mais relevantes:</p>
+      <?= View::partial('reports/_findings', ['list' => array_slice($findings, 0, 15)]) ?>
+    <?php endif; ?>
+  </section>
+
+  <section class="card tab-pane" data-pane="tables">
+    <h3>Achados</h3>
+    <?= View::partial('reports/_findings', ['list' => $byCat(['schema', 'bloat', 'types', 'relationships', 'statistics'])]) ?>
+    <h3 class="mt">Tabelas (<?= count($tables) ?>)</h3>
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>Tabela</th><th class="right">Linhas</th><th class="right">Dados</th><th class="right">Índices</th><th class="right">Dead %</th><th>PK</th><th>Relacionamentos</th></tr></thead>
+      <tbody><?php foreach (array_slice($tables, 0, 300) as $t): ?>
+        <tr><td><?= e($t['schema'] . '.' . $t['name']) ?></td><td class="right"><?= number_format($t['rows'], 0, ',', '.') ?></td>
+        <td class="right"><?= human_bytes($t['data_bytes']) ?></td><td class="right"><?= human_bytes($t['index_bytes']) ?></td>
+        <td class="right"><?= isset($t['dead_pct']) ? e($t['dead_pct']) . '%' : '—' ?></td>
+        <td><?= $t['has_pk'] ? '<span class="ok">✔</span>' : '<span class="bad">✘</span>' ?></td>
+        <td class="small"><?= $t['isolated'] ? '<span class="muted">isolada</span>' : 'conectada' ?></td></tr>
+      <?php endforeach; ?></tbody>
+    </table></div>
+    <h3 class="mt">Chaves estrangeiras (<?= count($m['schemas']['foreign_keys'] ?? []) ?>)</h3>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Constraint</th><th>Tabela</th><th>Colunas</th><th>Referencia</th></tr></thead><tbody>
+      <?php foreach (array_slice($m['schemas']['foreign_keys'] ?? [], 0, 300) as $fk): ?>
+        <tr><td><code><?= e($fk['name']) ?></code></td><td><?= e($fk['table_name']) ?></td><td><?= e($fk['columns']) ?></td><td><?= e($fk['ref_table']) ?></td></tr>
+      <?php endforeach; ?></tbody></table></div>
+  </section>
+
+  <section class="card tab-pane" data-pane="idx">
+    <?= View::partial('reports/_findings', ['list' => $byCat(['indexes'])]) ?>
+    <h3 class="mt">Inventário de índices</h3>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Tabela</th><th>Índice</th><th class="right">Tamanho</th><th class="right">Scans</th><th>Definição</th></tr></thead><tbody>
+      <?php foreach (array_slice($m['indexes']['indexes'] ?? [], 0, 300) as $i): ?>
+        <tr><td><?= e($i['table']) ?></td><td><?= e($i['name']) ?><?= $i['primary'] ? ' <span class="badge">PK</span>' : ($i['unique'] ? ' <span class="badge">UQ</span>' : '') ?></td>
+        <td class="right"><?= isset($i['bytes']) ? human_bytes($i['bytes']) : '—' ?></td><td class="right"><?= isset($i['scans']) ? number_format($i['scans'], 0, ',', '.') : '—' ?></td>
+        <td class="small"><code><?= e(mb_substr($i['def'], 0, 160)) ?></code></td></tr>
+      <?php endforeach; ?></tbody></table></div>
+  </section>
+
+  <section class="card tab-pane" data-pane="q">
+    <?= View::partial('reports/_findings', ['list' => $byCat(['queries', 'locks', 'observability'])]) ?>
+    <h3 class="mt">Queries mais custosas</h3>
+    <?php if (empty($m['queries']['top_queries'])): ?><p class="muted">Sem dados de pg_stat_statements / performance_schema.</p><?php else: ?>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Query</th><th class="right">Chamadas</th><th class="right">Total (ms)</th><th class="right">Média (ms)</th></tr></thead><tbody>
+      <?php foreach ($m['queries']['top_queries'] as $q): ?>
+        <tr><td><code class="small"><?= e(mb_substr(preg_replace('/\s+/', ' ', (string) $q['query']), 0, 300)) ?></code></td><td class="right"><?= number_format((int) $q['calls'], 0, ',', '.') ?></td>
+        <td class="right"><?= e($q['total_ms']) ?></td><td class="right"><?= e($q['mean_ms']) ?></td></tr>
+      <?php endforeach; ?></tbody></table></div>
+    <?php endif; ?>
+    <h3 class="mt">Sessões/transações longas no momento da coleta</h3>
+    <?php if (empty($m['queries']['activity'])): ?><p class="muted">Nenhuma.</p><?php else: ?>
+      <pre class="code small"><?= e(json_encode($m['queries']['activity'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) ?></pre>
+    <?php endif; ?>
+  </section>
+
+  <section class="card tab-pane" data-pane="tune">
+    <h3>Veredito: <span class="verdict verdict-<?= $verdictClass ?>"><?= e(mb_strtoupper($tuning['verdict'] ?? 'n/d')) ?></span></h3>
+    <?php if ($hw): ?><p class="small muted">Hardware informado: <?= e(($hw['vcpu'] ?? '?') . ' vCPU @ ' . ($hw['clock_ghz'] ?? '?') . ' GHz · ' . ($hw['ram_gb'] ?? '?') . ' GB RAM · disco ' . strtoupper($hw['disk'] ?? '?')) ?></p><?php endif; ?>
+    <?php if (!empty($tuning['reasons'])): ?><ul><?php foreach ($tuning['reasons'] as $r): ?><li><?= e($r) ?></li><?php endforeach; ?></ul><?php endif; ?>
+    <?= View::partial('reports/_findings', ['list' => $byCat(['sizing'])]) ?>
+    <div class="grid two mt">
+      <div>
+        <h3>Configuração atual</h3>
+        <table class="table"><tbody>
+          <?php foreach ($m['sizing']['settings'] ?? [] as $k => $s): ?>
+            <tr><td><code><?= e($k) ?></code></td><td class="right"><?= e($s['value'] . (!empty($s['unit']) ? ' ' . $s['unit'] : '')) ?><?= isset($s['bytes']) && $s['bytes'] > 1048576 ? ' <span class="muted small">(' . human_bytes($s['bytes']) . ')</span>' : '' ?></td>
+            <td class="small ok"><?= e($tuning['recommended'][$k] ?? '') ?></td></tr>
+          <?php endforeach; ?>
+        </tbody></table>
+        <h3 class="mt">Métricas</h3>
+        <table class="table"><tbody>
+          <?php foreach ($m['sizing']['stats'] ?? [] as $k => $v): ?><tr><td><code><?= e($k) ?></code></td><td class="right"><?= e(is_scalar($v) ? (string) $v : json_encode($v)) ?></td></tr><?php endforeach; ?>
+        </tbody></table>
+      </div>
+      <div>
+        <h3>Configuração recomendada para o hardware</h3>
+        <?php if (!empty($tuning['config'])): ?>
+          <div class="code-block"><button type="button" class="copy-btn" data-copy>Copiar</button><pre class="code"><code><?= e($tuning['config']) ?></code></pre></div>
+        <?php else: ?><p class="muted">Informe vCPU e RAM na próxima análise para gerar o bloco de configuração.</p><?php endif; ?>
+      </div>
+    </div>
+  </section>
+
+  <section class="card tab-pane" data-pane="sql">
+    <p class="muted small">Scripts gerados automaticamente. Revise, teste em homologação e aplique em janela de manutenção. Nada foi executado no banco analisado.</p>
+    <?php if ($sqlAll): ?>
+      <div class="code-block"><button type="button" class="copy-btn" data-copy>Copiar tudo</button><pre class="code"><code><?= e("-- Laudo #{$a['id']} · {$a['database_name']}\n\n" . $sqlAll) ?></code></pre></div>
+    <?php else: ?><p class="muted">Nenhum script de correção necessário.</p><?php endif; ?>
+  </section>
+</div>

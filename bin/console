@@ -1,0 +1,95 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+/**
+ * CLI de manutenção do DB Oráculo Analyzer.
+ *   php bin/console migrate
+ *   php bin/console admin:init [--password=SENHA]     cria o admin se não existir (imprime a senha gerada)
+ *   php bin/console user:password <login> [--password=SENHA]   redefine senha (gera aleatória se omitida)
+ *   php bin/console user:create <login> [--role=ADMIN|CLIENT] [--password=SENHA]
+ *   php bin/console key:generate                      imprime uma nova app_key
+ *   php bin/console logs:prune [--days=180]
+ */
+if (PHP_SAPI !== 'cli') {
+    exit(1);
+}
+require dirname(__DIR__) . '/app/bootstrap.php';
+
+use App\Core\{Audit, Auth, Crypto, Database};
+
+$args = array_slice($argv, 1);
+$cmd = array_shift($args) ?? 'help';
+$opt = [];
+$pos = [];
+foreach ($args as $a) {
+    if (preg_match('/^--([\w-]+)=(.*)$/s', $a, $m)) {
+        $opt[$m[1]] = $m[2];
+    } else {
+        $pos[] = $a;
+    }
+}
+$genPassword = static fn(): string => rtrim(strtr(base64_encode(random_bytes(15)), '+/', 'Kx'), '=');
+$sys = ['id' => null, 'username' => 'system'];
+
+switch ($cmd) {
+    case 'migrate':
+        $applied = Database::migrate();
+        echo $applied ? 'Migrations aplicadas: ' . implode(', ', $applied) . PHP_EOL : "Banco já está atualizado.\n";
+        break;
+
+    case 'admin:init':
+        Database::migrate();
+        if (Database::value("SELECT COUNT(*) FROM users WHERE role = 'ADMIN'") > 0) {
+            echo "Administrador já existe — nada a fazer.\n";
+            break;
+        }
+        $pw = $opt['password'] ?? $genPassword();
+        Database::insert('users', ['username' => 'admin', 'password_hash' => Auth::hash($pw), 'role' => 'ADMIN', 'display_name' => 'Administrador', 'must_change_password' => 1]);
+        Audit::log('user.created', "Administrador inicial criado via CLI", 'INFO', [], $sys);
+        echo "ADMIN_CREATED\nusuario: admin\nsenha: $pw\n";
+        break;
+
+    case 'user:create':
+    case 'user:password':
+        $login = $pos[0] ?? null;
+        if (!$login) {
+            fwrite(STDERR, "Informe o login.\n");
+            exit(1);
+        }
+        $pw = $opt['password'] ?? $genPassword();
+        if (mb_strlen($pw) < 10) {
+            fwrite(STDERR, "Senha precisa de 10+ caracteres.\n");
+            exit(1);
+        }
+        if ($cmd === 'user:create') {
+            $role = strtoupper($opt['role'] ?? 'CLIENT') === 'ADMIN' ? 'ADMIN' : 'CLIENT';
+            Database::insert('users', ['username' => $login, 'password_hash' => Auth::hash($pw), 'role' => $role, 'must_change_password' => 1]);
+            Audit::log('user.created', "Conta '$login' criada via CLI", 'INFO', [], $sys);
+        } else {
+            $n = Database::exec("UPDATE users SET password_hash = ?, must_change_password = 1, is_active = 1, updated_at = datetime('now') WHERE username = ?", [Auth::hash($pw), $login]);
+            if (!$n) {
+                fwrite(STDERR, "Usuário '$login' não encontrado.\n");
+                exit(1);
+            }
+            Database::exec('DELETE FROM login_attempts WHERE username = ?', [mb_strtolower($login)]);
+            Audit::log('user.password_reset', "Senha de '$login' redefinida via CLI", 'WARNING', [], $sys);
+        }
+        echo "usuario: $login\nsenha: $pw\n(troca obrigatória no próximo login)\n";
+        break;
+
+    case 'key:generate':
+        echo Crypto::generateKey() . PHP_EOL;
+        break;
+
+    case 'logs:prune':
+        $days = max(7, (int) ($opt['days'] ?? 180));
+        $n = Database::exec("DELETE FROM audit_logs WHERE created_at < datetime('now', ?)", ["-$days days"]);
+        Database::pdo()->exec('VACUUM');
+        echo "$n registros removidos.\n";
+        break;
+
+    default:
+        preg_match('#/\*\*(.*?)\*/#s', (string) file_get_contents(__FILE__), $m);
+        echo str_replace(' * ', '', $m[1] ?? '') . PHP_EOL;
+}

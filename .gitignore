@@ -1,0 +1,6 @@
+/storage/*
+!/storage/.gitkeep
+.DS_Store
+*.swp
+.idea/
+.vscode/

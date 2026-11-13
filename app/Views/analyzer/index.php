@@ -1,0 +1,68 @@
+<?php $GLOBALS['__scripts'] = ['analyzer.js']; ?>
+<?php if (!$ai): ?>
+<div class="alert alert-warning">Nenhuma IA vinculada à sua conta: o laudo será gerado apenas com regras determinísticas.</div>
+<?php else: ?>
+<div class="alert alert-info small">IA ativa: <strong><?= e($ai->provider) ?></strong> / <code><?= e($ai->model) ?></code>. Toda coleta é feita em <strong>modo somente leitura</strong>.</div>
+<?php endif; ?>
+<div class="analyzer">
+  <section class="card analyzer-form">
+    <form id="conn-form" class="form" autocomplete="off">
+      <h2>1 · Conexão</h2>
+      <div class="engine-pick">
+        <?php foreach ($engines as $k => $eng): ?>
+          <label class="engine-opt"><input type="radio" name="engine" value="<?= e($k) ?>" data-port="<?= (int) $eng['port'] ?>" <?= $k === 'postgresql' ? 'checked' : '' ?>><span><?= e($eng['label']) ?></span></label>
+        <?php endforeach; ?>
+      </div>
+      <div class="row">
+        <label class="grow">Host / IP<input name="host" required placeholder="10.0.0.15 ou db.exemplo.com"></label>
+        <label class="w-port">Porta<input name="port" type="number" min="1" max="65535" value="5432"></label>
+      </div>
+      <div class="row">
+        <label class="grow">Usuário<input name="username" required autocomplete="off"></label>
+        <label class="grow">Senha<input name="password" type="password" autocomplete="new-password"></label>
+      </div>
+      <label>SSL/TLS
+        <select name="ssl">
+          <option value="prefer">Preferir (prefer)</option><option value="require">Exigir (require)</option>
+          <option value="verify-full">Exigir e validar certificado (verify-full)</option><option value="disable">Desativado</option>
+        </select>
+      </label>
+      <button type="button" class="btn btn-primary btn-block" id="btn-list">🔌 Conectar e Listar Bancos</button>
+      <div class="test-result" id="conn-status"></div>
+
+      <h2 class="mt">2 · Banco e hardware</h2>
+      <label>Database<select name="database" id="db-select" disabled><option value="">— conecte primeiro —</option></select></label>
+      <div class="row">
+        <label>vCPUs<input name="vcpu" type="number" min="1" value="<?= e($infra['default_vcpu'] ?? '') ?>"></label>
+        <label>Clock (GHz)<input name="clock_ghz" inputmode="decimal" value="<?= e($infra['vcpu_clock_ghz'] ?? '') ?>"></label>
+        <label>RAM (GB)<input name="ram_gb" inputmode="decimal" value="<?= e($infra['default_ram_gb'] ?? '') ?>"></label>
+      </div>
+      <div class="row">
+        <label class="grow">Disco<select name="disk"><option value="ssd">SSD</option><option value="nvme">NVMe</option><option value="san">SAN/Storage</option><option value="hdd">HDD</option></select></label>
+        <label class="check grow"><input type="checkbox" name="dedicated" value="1" checked> Servidor dedicado ao banco</label>
+      </div>
+      <button type="button" class="btn btn-primary btn-block btn-glow" id="btn-start" disabled>⚡ Iniciar Análise Profunda</button>
+    </form>
+  </section>
+
+  <section class="card scan-stage">
+    <div class="scan-canvas-wrap">
+      <canvas id="scan-canvas"></canvas>
+      <div class="scan-overlay" id="scan-overlay">Aguardando conexão…</div>
+    </div>
+    <div class="telemetry">
+      <div class="odo"><span class="odo-v" data-odo="tables">0</span><span class="odo-l">tabelas</span></div>
+      <div class="odo"><span class="odo-v" data-odo="indexes">0</span><span class="odo-l">índices</span></div>
+      <div class="odo"><span class="odo-v" data-odo="fks">0</span><span class="odo-l">FKs</span></div>
+      <div class="odo"><span class="odo-v" data-odo="findings">0</span><span class="odo-l">achados</span></div>
+      <div class="odo"><span class="odo-v" data-odo="latency">0</span><span class="odo-l">ms latência</span></div>
+      <div class="odo"><span class="odo-v" data-odo="score">—</span><span class="odo-l">score</span></div>
+    </div>
+    <ol class="stages" id="stages">
+      <?php foreach ($stages as $k => $label): ?>
+        <li data-stage="<?= e($k) ?>"><span class="st-label"><?= e($label) ?></span><span class="st-bar"><i></i></span><span class="st-time"></span></li>
+      <?php endforeach; ?>
+    </ol>
+    <div class="terminal" id="terminal" aria-live="polite"><div class="t-line t-dim">oraculo@analyzer:~$ pronto.</div></div>
+  </section>
+</div>
