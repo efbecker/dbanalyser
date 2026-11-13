@@ -35,7 +35,7 @@
       <label class="check"><input type="checkbox" name="ssh_enabled" value="1" id="ssh-enabled"> Coletar memória, swap, CPU, disco e OOM do sistema operacional</label>
       <div id="ssh-fields" hidden>
         <p class="small muted">Somente leitura: o analisador roda apenas uma lista fixa de comandos de consulta (free, vmstat, /proc/meminfo, sysctl vm.*, dmesg, df…), sem sudo.
-          Use um usuário comum; para ver eventos de OOM ele precisa estar no grupo <code>adm</code>. As credenciais ficam só na sua sessão, cifradas, e não são gravadas.</p>
+          Use um usuário comum; para ver eventos de OOM ele precisa estar no grupo <code>adm</code> ou usar a opção de sudo abaixo. As credenciais ficam só na sua sessão, cifradas, e não são gravadas.</p>
         <div class="row">
           <label class="grow">Host SSH<input name="ssh_host" placeholder="mesmo host do banco"></label>
           <label class="w-port">Porta<input name="ssh_port" type="number" min="1" max="65535" value="22"></label>
@@ -47,6 +47,10 @@
         <label data-ssh="password">Senha SSH<input name="ssh_password" type="password" autocomplete="new-password"></label>
         <label data-ssh="key" hidden>Chave privada <small class="muted">(OpenSSH/PEM)</small><textarea name="ssh_key" rows="4" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
         <label data-ssh="key" hidden>Passphrase da chave <small class="muted">(se houver)</small><input name="ssh_passphrase" type="password" autocomplete="new-password"></label>
+        <label class="check"><input type="checkbox" name="ssh_sudo" value="1" id="ssh-sudo"> Usar sudo para ler o log do kernel (OOM) quando o usuário não tiver acesso</label>
+        <label id="ssh-sudo-pw" hidden>Senha do sudo <small class="muted">(vazio: usa a senha SSH, ou NOPASSWD no sudoers)</small><input name="ssh_sudo_password" type="password" autocomplete="new-password"></label>
+        <p class="small muted" id="ssh-sudo-help" hidden>O sudo é usado só em <code>journalctl -k</code> e <code>dmesg -T</code>, comandos de leitura da lista fixa. Regra mínima de sudoers:
+          <code>USUARIO ALL=(root) NOPASSWD: /usr/bin/journalctl -k -q --no-pager -n 1, /usr/bin/journalctl -k -q --no-pager --since=-30d, /usr/bin/dmesg -T</code></p>
         <button type="button" class="btn btn-ghost btn-block" id="btn-ssh">🔐 Testar SSH e detectar hardware</button>
         <div class="test-result" id="ssh-status"></div>
       </div>

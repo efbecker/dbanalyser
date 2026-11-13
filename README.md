@@ -96,7 +96,12 @@ O botão **Testar SSH e detectar hardware** preenche vCPUs, clock, RAM e tipo de
 OOM no `dmesg`/`journalctl -k`, `df` do diretório de dados e das montagens, `lsblk`, load e processos por memória.
 
 - Nada digitado vira comando; o único valor dinâmico é o diretório de dados lido do próprio banco, validado e escapado.
-- Sem `sudo`. Use um usuário comum; para ler o histórico de OOM ele precisa estar no grupo `adm` (`usermod -aG adm oraculo`).
+- Use um usuário comum. Para ler o histórico de OOM (log do kernel) ele precisa estar no grupo `adm`
+  (`usermod -aG adm oraculo`) **ou** marcar **Usar sudo**: o sudo só é usado em `journalctl -k` e `dmesg -T`, com a senha
+  do sudo enviada pela entrada padrão da sessão (nunca na linha de comando). Regra mínima de sudoers:
+  `oraculo ALL=(root) NOPASSWD: /usr/bin/journalctl -k -q --no-pager -n 1, /usr/bin/journalctl -k -q --no-pager --since=-30d, /usr/bin/dmesg -T`
+- Em VMs (virtio `vd*`, discos QEMU/VMware/Hyper-V) o kernel não conhece a mídia física e costuma marcar o disco como
+  rotacional. Nesses casos o analisador não afirma HDD/SSD: mantém o tipo escolhido no formulário e registra a ressalva no laudo.
 - Credenciais SSH ficam só na sessão, cifradas com libsodium como as do banco, e nunca são gravadas no SQLite.
   A chave privada vai para um arquivo temporário 0600 apagado logo após a conexão; a senha passa ao `sshpass` por variável de ambiente.
 - A chave do host é fixada na primeira conexão (`<data_dir>/ssh/known_hosts`). Se mudar, a coleta é recusada; após uma

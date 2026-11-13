@@ -112,6 +112,7 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
   <section class="card tab-pane" data-pane="tune">
     <h3>Veredito: <span class="verdict verdict-<?= $verdictClass ?>"><?= e(mb_strtoupper($tuning['verdict'] ?? 'n/d')) ?></span></h3>
     <?php if ($hw): ?><p class="small muted">Hardware <?= ($hw['source'] ?? '') === 'ssh' ? 'detectado via SSH' : 'informado' ?>: <?= e(($hw['vcpu'] ?? '?') . ' vCPU @ ' . ($hw['clock_ghz'] ?? '?') . ' GHz · ' . ($hw['ram_gb'] ?? '?') . ' GB RAM · disco ' . strtoupper($hw['disk'] ?? '?')) ?></p><?php endif; ?>
+    <?php if (!empty($hw['disk_note'])): ?><p class="small muted">O tipo de disco acima foi informado no formulário, não detectado: <?= e($hw['disk_note']) ?>.</p><?php endif; ?>
     <?php if (!empty($tuning['reasons'])): ?><ul><?php foreach ($tuning['reasons'] as $r): ?><li><?= e($r) ?></li><?php endforeach; ?></ul><?php endif; ?>
     <?= View::partial('reports/_findings', ['list' => $byCat(['sizing'])]) ?>
     <div class="grid two mt">
@@ -156,7 +157,7 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
               'Load (1/5/15 min)' => isset($osp['load']) ? "{$osp['load']['1m']} / {$osp['load']['5m']} / {$osp['load']['15m']}" : null,
               'vmstat (média)' => $vs ? "us {$vs['us']}% · sy {$vs['sy']}% · wa {$vs['wa']}% · id {$vs['id']}%" . ($vs['st'] !== null ? " · st {$vs['st']}%" : '') . " · si/so {$vs['si']}/{$vs['so']}" : null,
               'Transparent Huge Pages' => isset($osp['thp']['enabled']) ? $osp['thp']['enabled'] . ' (defrag ' . ($osp['thp']['defrag'] ?? '?') . ')' : null,
-              'OOM no kernel' => ($osp['oom_access'] ?? true) ? count($osp['oom_events'] ?? []) . ' evento(s)' : 'sem permissão para ler',
+              'OOM no kernel' => ($osp['oom_access'] ?? true) ? count($osp['oom_events'] ?? []) . ' evento(s)' . (!empty($osp['oom_via_sudo']) ? ' (lido via sudo)' : '') : 'sem permissão para ler' . (($osp['sudo'] ?? null) === 'negado' ? ' (sudo recusado)' : ''),
             ]) as $k => $v): ?><tr><td><?= e($k) ?></td><td class="right"><?= e($v) ?></td></tr><?php endforeach; ?>
           </tbody></table>
           <h3 class="mt">Memória</h3>
@@ -187,7 +188,7 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
           </tbody></table></div>
           <?php if (!empty($osp['disks'])): ?>
             <table class="table"><thead><tr><th>Dispositivo</th><th>Tipo</th><th class="right">Tamanho</th></tr></thead><tbody>
-              <?php foreach ($osp['disks'] as $d): ?><tr><td><?= e($d['name']) ?> <span class="muted small"><?= e((string) $d['model']) ?></span></td><td><?= str_starts_with($d['name'], 'nvme') ? 'NVMe' : ($d['rotational'] ? 'rotacional' : 'SSD') ?></td><td class="right"><?= $d['size'] ? human_bytes($d['size']) : '—' ?></td></tr><?php endforeach; ?>
+              <?php foreach ($osp['disks'] as $d): ?><tr><td><?= e($d['name']) ?> <span class="muted small"><?= e((string) $d['model']) ?></span></td><td><?= !empty($d['virtual']) ? 'virtual' . (!empty($d['discard']) ? ' · TRIM' : '') : (str_starts_with($d['name'], 'nvme') ? 'NVMe' : ($d['rotational'] ? 'rotacional' : 'SSD')) ?></td><td class="right"><?= $d['size'] ? human_bytes($d['size']) : '—' ?></td></tr><?php endforeach; ?>
             </tbody></table>
           <?php endif; ?>
           <h3 class="mt">Processos por memória</h3>

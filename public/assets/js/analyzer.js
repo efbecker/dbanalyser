@@ -390,7 +390,9 @@
     sshFields.hidden = !sshOn.checked;
     const mode = form.ssh_auth.value;
     form.querySelectorAll('[data-ssh]').forEach((el) => { el.hidden = el.dataset.ssh !== mode; });
+    $('#ssh-sudo-pw').hidden = $('#ssh-sudo-help').hidden = !form.ssh_sudo.checked;
   };
+  form.ssh_sudo.addEventListener('change', syncSsh);
   sshOn.addEventListener('change', syncSsh);
   form.ssh_auth.addEventListener('change', syncSsh);
   syncSsh();
@@ -418,13 +420,14 @@
     if (hw.clock_ghz) form.clock_ghz.value = String(hw.clock_ghz).replace('.', ',');
     if (hw.ram_gb) form.ram_gb.value = String(hw.ram_gb).replace('.', ',');
     if (hw.disk) form.disk.value = hw.disk;
+    if (hw.disk_note) out(`• ${hw.disk_note}: confirme o tipo de disco no formulário`, 't-warn');
     const i = r.info || {};
     sshStatus.className = 'test-result ok';
-    sshStatus.textContent = `✔ SSH ok em ${r.latency_ms} ms · ${[hw.vcpu && hw.vcpu + ' vCPU', i.ram && i.ram + ' RAM', hw.disk && hw.disk.toUpperCase(), i.virt].filter(Boolean).join(' · ')} — hardware preenchido`;
+    sshStatus.textContent = `✔ SSH ok em ${r.latency_ms} ms · ${[hw.vcpu && hw.vcpu + ' vCPU', i.ram && i.ram + ' RAM', hw.disk ? hw.disk.toUpperCase() : (hw.disk_note && 'disco virtual: confirme o tipo abaixo'), i.virt].filter(Boolean).join(' · ')} — hardware preenchido`;
     out(`✔ SSH ok · ${i.kernel || ''}`);
     if (i.cpu) out(`  ↳ ${i.cpu}`, 't-dim');
     if (r.fingerprint) out(`  ↳ host key fixada: ${r.fingerprint}`, 't-dim');
-    form.ssh_password.value = ''; form.ssh_key.value = ''; form.ssh_passphrase.value = ''; // não mantém segredos no DOM
+    form.ssh_password.value = ''; form.ssh_key.value = ''; form.ssh_passphrase.value = ''; form.ssh_sudo_password.value = ''; // não mantém segredos no DOM
   });
 
   btnStart.addEventListener('click', async () => {

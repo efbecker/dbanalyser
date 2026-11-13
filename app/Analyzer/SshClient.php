@@ -39,7 +39,7 @@ final class SshClient
             throw new \InvalidArgumentException('Porta SSH inválida.');
         }
         $auth = ($in['ssh_auth'] ?? 'password') === 'key' ? 'key' : 'password';
-        $c = ['host' => $host, 'port' => $port, 'username' => $user, 'auth' => $auth];
+        $c = ['host' => $host, 'port' => $port, 'username' => $user, 'auth' => $auth, 'sudo' => !empty($in['ssh_sudo'])];
         if ($auth === 'key') {
             $key = str_replace("\r\n", "\n", trim((string) ($in['ssh_key'] ?? ''))) . "\n";
             if (!preg_match('/^-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----\n/', $key)) {
@@ -53,7 +53,21 @@ final class SshClient
                 throw new \InvalidArgumentException('Informe a senha SSH (ou use chave privada).');
             }
         }
+        if ($c['sudo']) {
+            // Vazio: reaproveita a senha SSH (caso comum) ou depende de NOPASSWD no sudoers
+            $c['sudo_password'] = (string) ($in['ssh_sudo_password'] ?? '') ?: ($c['password'] ?? '');
+        }
         return $c;
+    }
+
+    public function sudo(): bool
+    {
+        return !empty($this->c['sudo']);
+    }
+
+    public function sudoPassword(): string
+    {
+        return (string) ($this->c['sudo_password'] ?? '');
     }
 
     public function label(): string
@@ -90,7 +104,7 @@ final class SshClient
      * Executa o script remoto (interpretado por /bin/sh) e devolve stdout, stderr e código de saída.
      * @return array{stdout:string,stderr:string,exit:int,ms:int}
      */
-    public function run(string $script, int $timeout = 45): array
+    public function run(string $script, int $timeout = 45, string $stdin = ''): array
     {
         $ssh = self::bin('ssh');
         if (!$ssh) {
@@ -126,7 +140,7 @@ final class SshClient
             $args[] = '--';
             $args[] = $c['username'] . '@' . $c['host'];
             $args[] = 'sh -c ' . escapeshellarg($script);
-            return $this->exec($args, $env, $timeout);
+            return $this->exec($args, $env, $timeout, $stdin);
         } finally {
             if ($keyFile && is_file($keyFile)) {
                 file_put_contents($keyFile, str_repeat("\0", strlen($c['private_key'] ?? '')));
@@ -140,12 +154,16 @@ final class SshClient
         return self::bin('sshpass') ?? throw new \RuntimeException('sshpass ausente no servidor do analisador (necessário para senha/passphrase). Instale: apt-get install sshpass');
     }
 
-    private function exec(array $args, array $env, int $timeout): array
+    private function exec(array $args, array $env, int $timeout, string $stdin = ''): array
     {
         $t0 = microtime(true);
         $p = proc_open($args, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $env);
         if (!is_resource($p)) {
             throw new \RuntimeException('Falha ao iniciar o cliente SSH.');
+        }
+        // A senha do sudo (quando houver) vai pela entrada padrão da sessão: nunca aparece em argv nem no ps remoto
+        if ($stdin !== '') {
+            fwrite($pipes[0], $stdin);
         }
         fclose($pipes[0]);
         stream_set_blocking($pipes[1], false);

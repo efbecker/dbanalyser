@@ -79,7 +79,11 @@ final class AnalyzerController
         }
         $fresh = ($in['ssh_password'] ?? '') !== '' || trim((string) ($in['ssh_key'] ?? '')) !== '';
         if (!$fresh && !$required && !empty($_SESSION['analyzer_ssh'])) {
-            return $_SESSION['analyzer_ssh'];
+            // Credenciais já testadas: só atualiza a opção de sudo, que pode ter sido marcada depois do teste
+            $c = json_decode((string) Crypto::decrypt($_SESSION['analyzer_ssh']), true) ?: [];
+            $c['sudo'] = !empty($in['ssh_sudo']);
+            $c['sudo_password'] = $c['sudo'] ? ((string) ($in['ssh_sudo_password'] ?? '') ?: ($c['sudo_password'] ?? '') ?: ($c['password'] ?? '')) : '';
+            return $_SESSION['analyzer_ssh'] = Crypto::encrypt(json_encode($c));
         }
         $conn = json_decode((string) Crypto::decrypt($_SESSION['analyzer_conn'] ?? null), true) ?: [];
         $c = SshClient::fromInput($in, (string) ($conn['host'] ?? ''));
@@ -222,7 +226,7 @@ final class AnalyzerController
             return ['log' => ['• Coleta via SSH não habilitada — etapa ignorada (o laudo vai listar os comandos de SO a rodar manualmente).'], 'counters' => [], 'findings' => 0];
         }
         $ssh = new SshClient($sshC);
-        $log = ['→ ssh ' . $ssh->label() . ' (somente leitura, ' . count(OsCollector::COMMANDS) . ' comandos fixos, sem sudo)'];
+        $log = ['→ ssh ' . $ssh->label() . ' (somente leitura, ' . count(OsCollector::COMMANDS) . ' comandos fixos, ' . ($ssh->sudo() ? 'sudo só para ler o log do kernel' : 'sem sudo') . ')'];
         $metrics = json_decode((string) $a['metrics_json'], true) ?: [];
         $dataDir = $this->dataDirectory($a, $ctx);
         try {
@@ -253,7 +257,11 @@ final class AnalyzerController
         if (isset($p['data_dir']['used_pct'])) {
             $log[] = "  ↳ dados em {$p['data_dir']['path']}: {$p['data_dir']['used_pct']}% usado, " . human_bytes($p['data_dir']['avail']) . ' livres';
         }
-        $log[] = $p['oom_access'] ?? true ? '  ↳ eventos de OOM no kernel: ' . count($p['oom_events'] ?? []) : '⚠ sem permissão para ler o log do kernel (OOM não verificado)';
+        $log[] = $p['oom_access'] ?? true ? '  ↳ eventos de OOM no kernel: ' . count($p['oom_events'] ?? []) . (!empty($p['oom_via_sudo']) ? ' (lido via sudo)' : '')
+            : '⚠ sem permissão para ler o log do kernel (OOM não verificado)' . (($p['sudo'] ?? null) === 'negado' ? ': sudo recusado' : '');
+        if (!empty($r['hardware']['disk_note'])) {
+            $log[] = '• ' . $r['hardware']['disk_note'] . ': mantido o tipo de disco informado no formulário';
+        }
 
         // Hardware: o detectado no servidor prevalece sobre o digitado
         $hw = json_decode((string) $a['hardware_json'], true) ?: [];

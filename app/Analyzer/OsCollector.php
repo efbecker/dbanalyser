@@ -27,10 +27,12 @@ final class OsCollector
         'vm'        => ['sysctl vm.*', 'for k in swappiness overcommit_memory overcommit_ratio nr_hugepages dirty_ratio dirty_background_ratio dirty_bytes dirty_background_bytes zone_reclaim_mode min_free_kbytes; do printf "%s=" "$k"; cat "/proc/sys/vm/$k" 2>/dev/null || echo; done'],
         'thp'       => ['Transparent Huge Pages', 'cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null'],
         'vmstat'    => ['vmstat 2 5', 'vmstat 2 5'],
-        'oom'       => ['Eventos de OOM', "{ if dmesg >/dev/null 2>&1; then dmesg -T 2>/dev/null; elif journalctl -k -q --no-pager -n 1 2>/dev/null | grep -q .; then journalctl -k -q --no-pager --since '-30 days' 2>/dev/null; else echo '__NO_ACCESS__'; fi; } | grep -i -E 'out of memory|oom-kill|oom_reaper|killed process|__NO_ACCESS__' | tail -n 30"],
+        // Journal do kernel (30 dias) é preferível ao buffer do dmesg (só desde o boot e circular). Tenta sem privilégio
+        // e, se a opção sudo estiver ligada, com sudo (priv). Comandos exatos, para caberem numa regra estreita de sudoers.
+        'oom'       => ['Eventos de OOM', "{ if journalctl -k -q --no-pager -n 1 2>/dev/null | grep -q .; then journalctl -k -q --no-pager --since=-30d 2>/dev/null; elif dmesg >/dev/null 2>&1; then dmesg -T 2>/dev/null; elif priv journalctl -k -q --no-pager -n 1 2>/dev/null | grep -q .; then echo '__VIA_SUDO__'; priv journalctl -k -q --no-pager --since=-30d 2>/dev/null; elif priv dmesg -T >/dev/null 2>&1; then echo '__VIA_SUDO__'; priv dmesg -T 2>/dev/null; else echo '__NO_ACCESS__'; fi; } | grep -i -E 'out of memory|oom-kill|oom_reaper|killed process|__NO_ACCESS__|__VIA_SUDO__' | tail -n 31"],
         'df'        => ['Uso de disco', 'df -P -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null || df -P -B1'],
         'dfi'       => ['Inodes', 'df -P -i -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null || df -P -i'],
-        'lsblk'     => ['Discos', 'lsblk -d -b -n -o NAME,ROTA,TYPE,SIZE,MODEL 2>/dev/null; for f in /sys/block/*/queue/rotational; do printf "%s=" "$f"; cat "$f"; done 2>/dev/null'],
+        'lsblk'     => ['Discos', 'lsblk -d -b -n -o NAME,ROTA,TYPE,SIZE,MODEL 2>/dev/null; for d in /sys/block/*; do n=${d##*/}; printf "%s/queue/rotational=" "$d"; cat "$d/queue/rotational"; printf "@disc %s=" "$n"; cat "$d/queue/discard_max_bytes" 2>/dev/null || echo 0; printf "@vendor %s=" "$n"; cat "$d/device/vendor" 2>/dev/null || echo; done 2>/dev/null'],
         'ps'        => ['Processos por memória', 'ps -eo rss=,pcpu=,comm= --sort=-rss 2>/dev/null | head -n 15'],
         'limits'    => ['ulimit do usuário', 'ulimit -n'],
     ];
@@ -47,15 +49,27 @@ final class OsCollector
         return $dir && preg_match('#^/[A-Za-z0-9._/\-]{1,250}$#', $dir) && !str_contains($dir, '..') ? rtrim($dir, '/') ?: '/' : null;
     }
 
-    private static function script(array $keys, ?string $dataDir): string
+    private static function script(array $keys, ?string $dataDir, bool $sudo = false): string
     {
         $s = "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C\n";
+        // priv: roda com sudo SÓ quando a opção está ligada. A senha chega pela 1ª linha da entrada padrão e fica numa
+        // variável do shell (printf é builtin: não aparece no ps). Sem senha, sudo -n (NOPASSWD) falha sem perguntar nada.
+        if ($sudo) {
+            $s .= "IFS= read -r __PW || __PW=\nexec </dev/null\n"
+                . "priv() { if [ -n \"\$__PW\" ]; then printf '%s\\n' \"\$__PW\" | sudo -S -p '' -- \"\$@\"; else sudo -n -- \"\$@\"; fi; }\n"
+                . "echo '@@@BEGIN sudo'\necho on\necho '@@@END sudo 0'\n";
+        } else {
+            $s .= "exec </dev/null\npriv() { return 1; }\n";
+        }
         foreach ($keys as $k) {
             $s .= "echo '@@@BEGIN $k'\n{ " . self::COMMANDS[$k][1] . "\n} 2>&1\necho \"@@@END $k \$?\"\n";
         }
         if ($dataDir) {
             $d = escapeshellarg($dataDir);
             $s .= "echo '@@@BEGIN datadir'\n{ df -P -B1 $d; df -P -i $d | tail -n 1; findmnt -n -o SOURCE,FSTYPE,OPTIONS -T $d; } 2>&1\necho \"@@@END datadir \$?\"\n";
+        }
+        if ($sudo) {
+            $s .= "sudo -n -k 2>/dev/null; unset __PW\n"; // descarta o cache de credenciais do sudo
         }
         return $s;
     }
@@ -65,7 +79,8 @@ final class OsCollector
     {
         $keys = $quick ? self::QUICK : array_keys(self::COMMANDS);
         $dataDir = self::validDataDir($dataDir);
-        $res = $this->ssh->run(self::script($keys, $quick ? null : $dataDir), $quick ? 25 : 60);
+        $sudo = !$quick && $this->ssh->sudo();
+        $res = $this->ssh->run(self::script($keys, $quick ? null : $dataDir, $sudo), $quick ? 25 : 60, $sudo ? $this->ssh->sudoPassword() . "\n" : '');
         $raw = [];
         if (preg_match_all('/^@@@BEGIN (\w+)\n(.*?)^@@@END \1 (\d+)$/ms', $res['stdout'], $mm, PREG_SET_ORDER)) {
             foreach ($mm as $m) {
@@ -167,13 +182,22 @@ final class OsCollector
 
         $oom = $o('oom');
         $p['oom_access'] = !str_contains($oom, '__NO_ACCESS__');
-        $p['oom_events'] = array_values(array_filter(array_map('trim', explode("\n", str_replace('__NO_ACCESS__', '', $oom)))));
+        $p['oom_via_sudo'] = str_contains($oom, '__VIA_SUDO__');
+        if (isset($raw['sudo'])) {
+            $p['sudo'] = $p['oom_via_sudo'] ? 'usado' : ($p['oom_access'] ? 'não necessário' : 'negado');
+        }
+        $p['oom_events'] = array_values(array_filter(array_map('trim', explode("\n", str_replace(['__NO_ACCESS__', '__VIA_SUDO__'], '', $oom)))));
         $p['oom_events'] = array_slice($p['oom_events'], -30);
 
         $p['filesystems'] = self::parseDf($o('df'), $o('dfi'));
 
         $disks = [];
+        $extra = [];
         foreach (explode("\n", $o('lsblk')) as $l) {
+            if (preg_match('/^@(disc|vendor) (\S+)=(.*)$/', trim($l), $m)) {
+                $extra[$m[2]][$m[1]] = trim($m[3]);
+                continue;
+            }
             if (preg_match('/^(loop|ram|zram|sr|fd)\d|^\/sys\/block\/(loop|ram|zram|sr|fd)\d/', trim($l))) {
                 continue;
             }
@@ -183,6 +207,17 @@ final class OsCollector
                 $disks[$m[1]] = ['name' => $m[1], 'rotational' => $m[2] === '1', 'size' => null, 'model' => null];
             }
         }
+        $virt = !empty($p['virtualization']) && $p['virtualization'] !== 'none';
+        foreach ($disks as $n => &$d) {
+            $vendor = $extra[$n]['vendor'] ?? '';
+            $d['discard'] = (int) ($extra[$n]['disc'] ?? 0) > 0;
+            // Disco virtual: virtio (vd*, xvd*) ou fornecedor de hypervisor. O kernel do convidado não conhece a mídia real:
+            // virtio-blk reporta ROTA=1 por padrão mesmo sobre SSD/NVMe, então "rotacional" não quer dizer HDD.
+            $d['virtual'] = (bool) preg_match('/^(vd|xvd)/', $n) || (bool) preg_match('/QEMU|VMware|Msft|VBOX|Virtual|Xen|Google|Amazon/i', $vendor . ' ' . ($d['model'] ?? ''))
+                || ($virt && !str_starts_with($n, 'nvme') && $d['rotational']);
+            $d['vendor'] = $vendor !== '' ? $vendor : null;
+        }
+        unset($d);
         $p['disks'] = array_values($disks);
 
         $procs = [];
@@ -260,7 +295,7 @@ final class OsCollector
         if (!empty($p['mem']['total'])) {
             // MemTotal desconta a memória reservada pelo kernel; arredonda para o tamanho "comercial"
             $gb = $p['mem']['total'] / 1024 ** 3;
-            $hw['ram_gb'] = $gb >= 3 ? (float) ceil($gb - 0.15) : round($gb, 1);
+            $hw['ram_gb'] = $gb >= 3 ? (float) ceil($gb - 0.15) : ceil($gb * 2 - 0.1) / 2;
         }
         $disks = array_values(array_filter($p['disks'] ?? [], fn($d) => !preg_match('/^(loop|ram|zram|sr|fd)/', $d['name'])));
         if ($disks) {
@@ -272,10 +307,13 @@ final class OsCollector
                 }
             }
             $main ??= $disks[0];
-            $hw['disk'] = str_starts_with($main['name'], 'nvme') ? 'nvme' : ($main['rotational'] ? 'hdd' : 'ssd');
-            if ($main['rotational'] && !empty($p['virtualization']) && $p['virtualization'] !== 'none') {
-                // Em VMs o disco virtual costuma reportar ROTA=1 mesmo sobre SSD/SAN: não afirma HDD.
-                unset($hw['disk']);
+            if (!empty($main['virtual'])) {
+                // Não inventa o tipo: o formulário mantém o que o usuário escolheu e o laudo registra a ressalva.
+                $hw['disk_note'] = "disco virtual {$main['name']}" . (!empty($p['virtualization']) ? " ({$p['virtualization']})" : '')
+                    . ': o hypervisor não expõe a mídia física' . ($main['rotational'] ? ' (o sinalizador "rotacional" de VM não indica HDD)' : '')
+                    . (!empty($main['discard']) ? '; aceita TRIM/discard, típico de storage SSD ou thin' : '');
+            } else {
+                $hw['disk'] = str_starts_with($main['name'], 'nvme') ? 'nvme' : ($main['rotational'] ? 'hdd' : 'ssd');
             }
         }
         return $hw;
@@ -304,7 +342,11 @@ final class OsCollector
                 . '. Reduza limites que permitem sobrecomprometer memória (conexões, work_mem/sort_buffer, workers) ou aumente a RAM.');
         } elseif (isset($p['oom_access']) && !$p['oom_access']) {
             $add('low', 'Sem acesso ao log do kernel para verificar OOM',
-                'dmesg e journalctl -k foram negados ao usuário SSH (kernel.dmesg_restrict=1). Para incluir o histórico de OOM no laudo, adicione o usuário ao grupo adm/systemd-journal (somente leitura).');
+                'dmesg e journalctl -k foram negados ao usuário SSH (kernel.dmesg_restrict=1)'
+                . (($p['sudo'] ?? null) === 'negado' ? ' e o sudo também foi recusado' : '') . '. Para incluir o histórico de OOM no laudo, '
+                . 'adicione o usuário ao grupo adm (usermod -aG adm USUARIO) ou ligue "Usar sudo" com a regra de sudoers abaixo.',
+                "# Regra mínima de sudoers, só leitura do log do kernel (visudo -f /etc/sudoers.d/oraculo):\n"
+                . "USUARIO ALL=(root) NOPASSWD: /usr/bin/journalctl -k -q --no-pager -n 1, /usr/bin/journalctl -k -q --no-pager --since=-30d, /usr/bin/dmesg -T");
         }
 
         if (isset($mem['available_pct']) && $mem['available_pct'] < 10) {
@@ -372,7 +414,9 @@ final class OsCollector
             $add('low', 'Diretório de dados montado com atime', "Opções de montagem: $opts. Use noatime para evitar escrita a cada leitura.");
         }
 
-        $dbProc = $isPg ? 'postgres' : 'mysqld|mariadbd';
+        $dbProc = match ($engine) {
+            'postgresql' => 'postgres', 'sqlserver' => 'sqlservr', 'oracle' => 'ora_|oracle|tnslsnr', default => 'mysqld|mariadbd',
+        };
         $other = array_filter($p['top_processes'] ?? [], fn($x) => !preg_match('/^(' . $dbProc . ')/', $x['command']));
         if (!empty($mem['total']) && $other) {
             $big = array_values(array_filter($other, fn($x) => $x['rss'] > $mem['total'] * 0.10));
@@ -400,7 +444,8 @@ final class OsCollector
             'sysctl vm' => implode(', ', array_map(fn($k, $v) => "$k=$v", array_keys($p['vm'] ?? []), $p['vm'] ?? [])) ?: null,
             'Huge pages' => isset($mem['hugepages_total']) ? "nr_hugepages {$mem['hugepages_total']} · THP " . ($p['thp']['enabled'] ?? '?') : null,
             'vmstat (média)' => $vs ? "us {$vs['us']}% sy {$vs['sy']}% wa {$vs['wa']}% id {$vs['id']}%" . ($vs['st'] !== null ? " st {$vs['st']}%" : '') . " · si/so {$vs['si']}/{$vs['so']} · r {$vs['r']}" : null,
-            'OOM no kernel' => ($p['oom_access'] ?? true) ? count($p['oom_events'] ?? []) . ' evento(s)' : 'sem permissão para ler o log do kernel',
+            'OOM no kernel' => ($p['oom_access'] ?? true) ? count($p['oom_events'] ?? []) . ' evento(s)' . (!empty($p['oom_via_sudo']) ? ' (lido via sudo)' : '') : 'sem permissão para ler o log do kernel',
+            'Discos' => implode(' · ', array_map(fn($d) => $d['name'] . ' ' . (!empty($d['virtual']) ? 'virtual (mídia física não exposta' . (!empty($d['discard']) ? ', aceita TRIM' : '') . ')' : (str_starts_with($d['name'], 'nvme') ? 'NVMe' : ($d['rotational'] ? 'rotacional' : 'SSD'))) . ($d['size'] ? ' ' . human_bytes($d['size']) : ''), $p['disks'] ?? [])) ?: null,
             'Diretório de dados' => isset($dd['size']) ? "{$dd['path']} em {$dd['mount']} (" . ($dd['fstype'] ?? '?') . "): {$dd['used_pct']}% usado, " . human_bytes($dd['avail']) . ' livres de ' . human_bytes($dd['size']) : null,
             'Montagens' => implode(' · ', array_map(fn($fs) => "{$fs['mount']} {$fs['used_pct']}%", $p['filesystems'] ?? [])) ?: null,
         ], fn($v) => $v !== null && $v !== '');
@@ -430,7 +475,12 @@ final class OsCollector
                 'livre' => human_bytes($p['data_dir']['avail']), 'uso_pct' => $p['data_dir']['used_pct'] ?? null, 'inodes_pct' => $p['data_dir']['inodes_pct'] ?? null,
             ] : null,
             'filesystems' => array_map(fn($fs) => "{$fs['mount']}: {$fs['used_pct']}% de " . human_bytes($fs['size']), $p['filesystems'] ?? []),
-            'discos' => $p['disks'] ?? null,
+            'discos' => array_map(fn($d) => array_filter([
+                'nome' => $d['name'], 'tamanho' => $d['size'] ? human_bytes($d['size']) : null,
+                'tipo' => !empty($d['virtual']) ? 'virtual: o hypervisor não expõe a mídia física; o sinalizador rotacional da VM NÃO indica HDD' : (str_starts_with($d['name'], 'nvme') ? 'nvme' : ($d['rotational'] ? 'hdd' : 'ssd')),
+                'trim_discard' => $d['discard'] ?? null, 'modelo' => $d['model'] ?? null,
+            ], fn($v) => $v !== null), $p['disks'] ?? []) ?: null,
+            'sudo' => $p['sudo'] ?? null,
             'processos_top_memoria' => array_map(fn($x) => $x['command'] . ' ' . human_bytes($x['rss']) . " cpu {$x['cpu_pct']}%", array_slice($p['top_processes'] ?? [], 0, 10)),
         ], fn($v) => $v !== null && $v !== []);
     }
