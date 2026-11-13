@@ -357,6 +357,10 @@
     out(`✔ Handshake concluído em ${r.latency_ms} ms — ${r.databases.length} banco(s) visíveis`);
     dbSelect.innerHTML = '<option value="">— selecione —</option>' + r.databases.map((d) => `<option value="${esc(d.name)}">${esc(d.name)} (${esc(d.size)})</option>`).join('');
     dbSelect.disabled = false;
+    if (r.connected_db && r.connected_db !== 'postgres') {
+      out(`• Conexão inicial feita no banco "${r.connected_db}" (restrição de pg_hba)`);
+      if ([...dbSelect.options].some((o) => o.value === r.connected_db)) { dbSelect.value = r.connected_db; btnStart.disabled = false; }
+    }
     form.password.value = ''; // não mantém a senha no DOM após validar
   });
 

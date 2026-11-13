@@ -69,6 +69,34 @@ final class Connector
         return $pdo;
     }
 
+    /**
+     * Conexão inicial (para listar bancos). No PostgreSQL o pg_hba.conf costuma liberar o usuário
+     * apenas em bancos específicos (ex.: "host zabbix zabbix ..."), então tentamos em ordem:
+     * banco informado, postgres, banco com o nome do usuário e template1.
+     * @return array{0: PDO, 1: ?string} conexão e banco efetivamente usado
+     */
+    public static function connectAny(array $c, ?string $preferred = null): array
+    {
+        if ($c['engine'] !== 'postgresql') {
+            return [self::connect($c, $preferred ?: null), $preferred ?: null];
+        }
+        $candidates = array_values(array_unique(array_filter([$preferred, 'postgres', $c['username'], 'template1'])));
+        $first = null;
+        foreach ($candidates as $db) {
+            try {
+                return [self::connect($c, $db), $db];
+            } catch (\PDOException $e) {
+                $first ??= $e;
+                $m = $e->getMessage();
+                // Só vale tentar outro banco quando o erro é específico do banco (pg_hba ou banco inexistente)
+                if (!str_contains($m, 'pg_hba.conf') && !preg_match('/database "[^"]+" does not exist|banco de dados "[^"]+" n[ãa]o existe/u', $m)) {
+                    throw $e;
+                }
+            }
+        }
+        throw $first;
+    }
+
     public static function listDatabases(PDO $pdo, string $engine): array
     {
         if ($engine === 'postgresql') {

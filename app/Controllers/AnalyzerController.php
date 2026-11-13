@@ -53,12 +53,12 @@ final class AnalyzerController
         try {
             $c = $this->connInput();
             $t0 = microtime(true);
-            $pdo = Connector::connect($c);
+            [$pdo, $usedDb] = Connector::connectAny($c, Http::str('initial_db') ?: null);
             $latency = (int) ((microtime(true) - $t0) * 1000);
             $dbs = Connector::listDatabases($pdo, $c['engine']);
             $_SESSION['analyzer_conn'] = Crypto::encrypt(json_encode($c));
             Audit::log('db.connect', "Conexão em {$c['engine']}://{$c['username']}@{$c['host']}:{$c['port']}", 'INFO', ['databases' => count($dbs)]);
-            Http::json(['ok' => true, 'latency_ms' => $latency, 'databases' => array_map(fn($d) => ['name' => $d['name'], 'size' => human_bytes((int) $d['size'])], $dbs)]);
+            Http::json(['ok' => true, 'latency_ms' => $latency, 'connected_db' => $usedDb, 'databases' => array_map(fn($d) => ['name' => $d['name'], 'size' => human_bytes((int) $d['size'])], $dbs)]);
         } catch (\Throwable $e) {
             Audit::log('db.connect_failed', 'Falha de conexão: ' . $e->getMessage(), 'WARNING', ['host' => $c['host'] ?? null]);
             Http::json(['ok' => false, 'error' => self::friendly($e)], 200);
@@ -207,7 +207,9 @@ final class AnalyzerController
     {
         $m = $e->getMessage();
         return match (true) {
-            str_contains($m, 'password authentication failed'), str_contains($m, 'Access denied') => 'Usuário ou senha recusados pelo servidor de banco.',
+            str_contains($m, 'pg_hba.conf') => 'O pg_hba.conf do servidor não libera este usuário/IP no banco tentado (o analisador já tenta o banco informado, postgres, o banco com o nome do usuário e template1). '
+                . 'Informe em "Banco inicial" um banco liberado para o usuário (ex.: zabbix) ou adicione uma linha no pg_hba.conf para o IP deste servidor.',
+            str_contains($m, 'password authentication failed'), str_contains($m, 'autenticação do tipo senha falhou'), str_contains($m, 'Access denied') => 'Usuário ou senha recusados pelo servidor de banco.',
             str_contains($m, 'Connection refused') => 'Conexão recusada: verifique host, porta e firewall.',
             str_contains($m, 'timeout'), str_contains($m, 'timed out') => 'Tempo de conexão esgotado: host inacessível ou firewall bloqueando.',
             str_contains($m, 'could not translate host'), str_contains($m, 'getaddrinfo') => 'Não foi possível resolver o nome do host.',

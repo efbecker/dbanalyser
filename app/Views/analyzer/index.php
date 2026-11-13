@@ -21,6 +21,7 @@
         <label class="grow">Usuário<input name="username" required autocomplete="off"></label>
         <label class="grow">Senha<input name="password" type="password" autocomplete="new-password"></label>
       </div>
+      <label>Banco inicial <small class="muted">(opcional; use se o pg_hba.conf só libera um banco, ex.: zabbix)</small><input name="initial_db" placeholder="automático: postgres → nome do usuário"></label>
       <label>SSL/TLS
         <select name="ssl">
           <option value="prefer">Preferir (prefer)</option><option value="require">Exigir (require)</option>
