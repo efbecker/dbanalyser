@@ -30,7 +30,8 @@ final class MarkdownReport
         foreach ($f as $x) {
             $md .= '- **[' . strtoupper($x['severity']) . "] {$x['title']}** — {$x['detail']}\n";
         }
-        $md .= "\n## Configuração de referência\n\n```ini\n" . ($t['config'] ?? '') . "```\n\n";
+        $md .= "\n" . VulnCheck::markdown($m['vulns'] ?? []);
+        $md .= "## Configuração de referência\n\n```ini\n" . ($t['config'] ?? '') . "```\n\n";
         $os = $m['os']['parsed'] ?? null;
         if ($os) {
             $md .= "## Sistema operacional (coletado via SSH em {$m['os']['target']})\n\n| Item | Valor |\n|---|---|\n";

@@ -65,8 +65,8 @@ sudo -u www-data php /var/www/db-analyzer/bin/console user:password admin
 ## Como a análise funciona
 
 1. **Conectar e listar bancos**: valida credenciais com sessão `READ ONLY` + `statement_timeout`/`max_execution_time`.
-2. A análise roda em 8 etapas (`/api/analyzer/step`), cada uma devolvendo log, contadores e grafo para a animação:
-   Conectando → Mapeando Schemas → Analisando Índices → Avaliando Queries → Hardware/Buffers → SO via SSH (opcional) → Consultando IA → Laudo.
+2. A análise roda em 9 etapas (`/api/analyzer/step`), cada uma devolvendo log, contadores e grafo para a animação:
+   Conectando → Mapeando Schemas → Analisando Índices → Avaliando Queries → Hardware/Buffers → SO via SSH (opcional) → Vulnerabilidades → Consultando IA → Laudo.
 3. Regras determinísticas geram achados com severidade e **SQL de correção**; o `Sizing` calcula a configuração de
    referência para o hardware informado e um veredito (subdimensionado / superdimensionado / mal tunado / adequado).
 4. A IA recebe a coleta compactada e devolve o laudo em Markdown. Sem IA configurada, o laudo é só heurístico.
@@ -96,6 +96,26 @@ OOM no `dmesg`/`journalctl -k`, `df` do diretório de dados e das montagens, `ls
   reinstalação legítima rode `sudo -u www-data php bin/console ssh:forget <host>`.
 - Os dados alimentam achados da categoria `os`, o veredito de dimensionamento (OOM, swap ativa, load e iowait) e o prompt da IA.
   Se o SSH falhar, a análise continua sem os dados do SO.
+
+### Vulnerabilidades e ciclo de vida da versão
+
+A etapa **Checando Vulnerabilidades** compara a versão exata do servidor (e, no PostgreSQL, as extensões com CVEs
+próprios, como PostGIS, TimescaleDB e pgvector) com uma base local e mostra na aba **Segurança & Versão**: CVEs que
+afetam a versão (com CVSS, versão que corrige e marcação de exploração ativa da CISA KEV), se o ciclo está sem suporte
+(EOL), quantas versões de correção a instalação está atrasada e para qual versão atualizar.
+
+- **Funciona sem internet.** Nenhuma consulta externa é feita durante a análise; a base `data/vulndb.json` vem no código.
+- **Fontes:** NVD (configurações CPE) + dados dos próprios fabricantes no registro CVE (PostgreSQL, Oracle, Microsoft,
+  MariaDB), via o espelho [fkie-cad/nvd-json-data-feeds](https://github.com/fkie-cad/nvd-json-data-feeds); ciclo de
+  vida pelo [endoflife.date](https://endoflife.date). O dado do fabricante cobre CVEs recentes que o NVD ainda não analisou.
+- **Atualização:** o workflow `.github/workflows/vulndb.yml` regera a base toda segunda e faz commit na `main`; cada
+  servidor baixa o arquivo novo com `php bin/console vulndb:update` (cron semanal instalado pelo `install.sh`).
+  Para regerar à mão: `pip install pyyaml && python3 tools/build_vulndb.py`.
+- `php bin/console vulndb:status` mostra a data da base em uso; `vulndb:check postgresql 16.2` testa uma versão.
+- Motores: PostgreSQL, MySQL, MariaDB, SQL Server (build `15.0.4xxx`, linha GDR ou CU) e Oracle (RU, ex.: `19.21`;
+  se o servidor informar só `19.0.0.0.0`, os CVEs não são verificados e o laudo avisa).
+- Limitação: vale a versão informada pelo servidor. Pacotes de distribuição com correções retroportadas (ex.: RHEL)
+  podem aparecer como vulneráveis sem estar.
 
 Para adicionar um motor novo, implemente `App\Analyzer\Collector` e registre em `Connector::collector()`.
 

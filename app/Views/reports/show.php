@@ -48,6 +48,7 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
     <button data-tab="q">Queries &amp; Performance</button>
     <button data-tab="tune">Dimensionamento &amp; Tuning</button>
     <button data-tab="os">Sistema Operacional</button>
+    <button data-tab="sec">Segurança &amp; Versão<?php $nSec = (int) ($m['vulns']['cve_total'] ?? 0); if ($nSec): ?> <span class="badge"><?= $nSec ?></span><?php endif; ?></button>
     <button data-tab="sql">Scripts SQL</button>
   </nav>
 
@@ -206,6 +207,10 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
         <?php endforeach; ?>
       </details>
     <?php endif; ?>
+  </section>
+
+  <section class="card tab-pane" data-pane="sec">
+    <?= View::partial('reports/_security', ['v' => $m['vulns'] ?? [], 'list' => $byCat(['security'])]) ?>
   </section>
 
   <section class="card tab-pane" data-pane="sql">

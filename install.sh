@@ -211,9 +211,16 @@ cat > /etc/cron.d/db-analyzer <<CRON
 30 3 * * 0 www-data php $APP_DIR/bin/console logs:prune --days=180 >/dev/null
 # Limpa sessões expiradas (o GC do PHP vem desativado no Debian)
 */30 * * * * www-data find $DATA_DIR/sessions -type f -name 'sess_*' -mmin +240 -delete
+# Base de CVEs/EOL dos SGBDs (semanal). Sem internet, o laudo segue com a base que vem no código.
+45 4 * * 1 www-data php $APP_DIR/bin/console vulndb:update >/dev/null 2>&1
 CRON
 chmod 0644 /etc/cron.d/db-analyzer
 ok "Backup diário em $DATA_DIR/backups"
+if as_www php "$APP_DIR/bin/console" vulndb:update >/dev/null 2>&1; then
+  ok "Base de vulnerabilidades atualizada"
+else
+  warn "Sem acesso ao GitHub para atualizar a base de CVEs: usando a que vem com o código ($(cd "$APP_DIR" && php bin/console vulndb:status 2>/dev/null | sed -n 's/^Gerada em: \([0-9-]*\).*/\1/p'))"
+fi
 
 # -----------------------------------------------------------------------------
 echo -e "\n${G}════════════════════════════════════════════════════════════${N}"

@@ -433,7 +433,7 @@
       li.className = 'running';
       out(`→ [${s.stages[stage]}]`);
       if (stage === 'connect') setPhase('connecting', '⟲ Reconectando em modo somente leitura');
-      if (['schemas', 'indexes', 'queries', 'sizing', 'os'].includes(stage)) setPhase('scanning', '⟟ ' + s.stages[stage]);
+      if (['schemas', 'indexes', 'queries', 'sizing', 'os', 'vulns'].includes(stage)) setPhase('scanning', '⟟ ' + s.stages[stage]);
       if (stage === 'ai') setPhase('ai');
       if (stage === 'report') setPhase('scanning', '✎ Gerando laudo técnico');
 

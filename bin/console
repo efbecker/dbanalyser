@@ -11,12 +11,16 @@ declare(strict_types=1);
  *   php bin/console key:generate                      imprime uma nova app_key
  *   php bin/console logs:prune [--days=180]
  *   php bin/console ssh:forget <host> [--port=22]     esquece a chave SSH fixada de um servidor (após reinstalação legítima)
+ *   php bin/console vulndb:update [--url=URL]           baixa a base de CVEs/EOL mais recente (o laudo funciona offline sem ela)
+ *   php bin/console vulndb:status                       mostra a data da base de vulnerabilidades em uso
+ *   php bin/console vulndb:check <motor> <versão>       ex.: vulndb:check postgresql 16.2
  */
 if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 require dirname(__DIR__) . '/app/bootstrap.php';
 
+use App\Analyzer\VulnCheck;
 use App\Core\{Audit, Auth, Crypto, Database};
 
 $args = array_slice($argv, 1);
@@ -99,6 +103,36 @@ switch ($cmd) {
         $n = Database::exec("DELETE FROM audit_logs WHERE created_at < datetime('now', ?)", ["-$days days"]);
         Database::pdo()->exec('VACUUM');
         echo "$n registros removidos.\n";
+        break;
+
+    case 'vulndb:update':
+        [$ok, $msg] = VulnCheck::update($opt['url'] ?? null);
+        echo $msg . PHP_EOL;
+        exit($ok ? 0 : 1);
+
+    case 'vulndb:status':
+        $d = VulnCheck::db();
+        if (!$d) {
+            echo "Nenhuma base de vulnerabilidades encontrada.\n";
+            exit(1);
+        }
+        echo "Base: {$d['_path']}\nGerada em: {$d['generated_at']} (feed NVD: " . ($d['nvd_feed_at'] ?? '?') . ")\n";
+        foreach ($d['engines'] as $k => $e) {
+            printf("  %-11s %5d CVEs, %d ciclos\n", $k, count($e['cves']), count($e['cycles']));
+        }
+        break;
+
+    case 'vulndb:check':
+        [$engine, $ver] = [$pos[0] ?? '', $pos[1] ?? ''];
+        if ($engine === '' || $ver === '') {
+            fwrite(STDERR, "Uso: vulndb:check <postgresql|mysql|mariadb|sqlserver|oracle> <versão>\n");
+            exit(1);
+        }
+        $r = VulnCheck::evaluate($engine, ['version' => $ver]);
+        echo implode(PHP_EOL, $r['log']) . PHP_EOL;
+        foreach ($r['findings'] as $f) {
+            echo PHP_EOL . '[' . strtoupper($f['severity']) . "] {$f['title']}\n{$f['detail']}\n";
+        }
         break;
 
     default:

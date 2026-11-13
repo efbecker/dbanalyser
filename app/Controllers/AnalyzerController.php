@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Ai\AiClient;
-use App\Analyzer\{Connector, OsCollector, Prompt, Scorer, Sizing, SshClient};
+use App\Analyzer\{Connector, OsCollector, Prompt, Scorer, Sizing, SshClient, VulnCheck};
 use App\Core\{Audit, Auth, Crypto, Database, Http, View};
 
 final class AnalyzerController
@@ -16,6 +16,7 @@ final class AnalyzerController
         'queries' => 'Avaliando Queries',
         'sizing'  => 'Checando Hardware/Buffers',
         'os'      => 'Coletando SO via SSH',
+        'vulns'   => 'Checando Vulnerabilidades',
         'ai'      => 'Consultando IA',
         'report'  => 'Gerando Laudo Técnico',
     ];
@@ -149,6 +150,7 @@ final class AnalyzerController
         $t0 = microtime(true);
         try {
             $res = match ($stage) {
+                'vulns' => $this->stageVulns($a),
                 'ai' => $this->stageAi($a),
                 'report' => $this->stageReport($a),
                 'os' => $this->stageOs($a),
@@ -299,6 +301,28 @@ final class AnalyzerController
             'mysql', 'mariadb' => '/var/lib/mysql',
             default => null,
         };
+    }
+
+    /** CVEs e ciclo de vida da versão coletada. Usa só a base local: não depende de internet e nunca derruba a análise. */
+    private function stageVulns(array $a): array
+    {
+        $metrics = json_decode((string) $a['metrics_json'], true) ?: [];
+        try {
+            $out = VulnCheck::evaluate((string) $a['engine'], $metrics['connect'] ?? []);
+        } catch (\Throwable $e) {
+            $out = ['metrics' => ['status' => 'error', 'error' => $e->getMessage()], 'findings' => [], 'log' => ['⚠ Checagem de vulnerabilidades indisponível: ' . mb_substr($e->getMessage(), 0, 160)]];
+        }
+        $metrics['vulns'] = $out['metrics'];
+        $findings = array_values(array_filter(json_decode((string) $a['findings_json'], true) ?: [], fn($f) => ($f['stage'] ?? '') !== 'vulns'));
+        foreach ($out['findings'] as $f) {
+            $findings[] = $f + ['stage' => 'vulns'];
+        }
+        Database::update('analyses', [
+            'metrics_json' => json_encode($metrics, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+            'findings_json' => json_encode($findings, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
+        ], 'id = :id', ['id' => $a['id']]);
+        return ['log' => $out['log'], 'counters' => ['cves' => (int) ($out['metrics']['cve_total'] ?? 0)], 'findings' => count($out['findings']),
+            'severities' => array_count_values(array_column($out['findings'], 'severity'))];
     }
 
     private function stageAi(array $a): array

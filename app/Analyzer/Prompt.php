@@ -21,6 +21,9 @@ Regras:
 - Não use links internos em Markdown nem título de nível 1 (#); comece direto em ## Resumo Executivo.
 - Se a coleta trouxer "sistema_operacional" (lido do servidor via SSH), use esses dados (RAM, swap, vmstat, OOM, sysctl, THP, disco) no veredito
   e nos riscos, e NÃO peça para rodar de novo comandos já coletados. Se não trouxer, liste em "Próximos Passos" os comandos de SO que faltam.
+- Se a coleta trouxer "seguranca_versao" (CVEs conhecidos e ciclo de vida da versão do SGBD), cite em Principais Riscos
+  a versão sem suporte e os CVEs mais graves (pelo ID) e coloque no Plano de Ação a atualização para "atualizar_para"
+  (ou o upgrade de major, se o ciclo não tiver suporte). Use só os CVEs listados; não invente IDs.
 - Seções obrigatórias, nesta ordem:
   ## Resumo Executivo
   ## Veredito de Dimensionamento  (comece com uma linha: **Veredito: SUBDIMENSIONADO | SUPERDIMENSIONADO | MAL TUNADO | ADEQUADO**)
@@ -52,6 +55,7 @@ TXT;
             'veredito_heuristico' => ['veredito' => $tuning['verdict'] ?? null, 'motivos' => $tuning['reasons'] ?? [], 'config_referencia' => $tuning['recommended'] ?? []],
             'sistema_operacional' => isset($metrics['os']['parsed']) ? OsCollector::summary($metrics['os']['parsed'])
                 : (isset($metrics['os']['error']) ? ['falha_na_coleta_ssh' => $metrics['os']['error']] : null),
+            'seguranca_versao' => VulnCheck::summary($metrics['vulns'] ?? []),
             'achados' => array_map(fn($f) => "[{$f['severity']}/{$f['category']}] {$f['title']}" . (!empty($f['managed']) ? ' (objeto da aplicação)' : ''), array_slice($findings, 0, 80)),
         ];
         return "Coleta técnica (JSON):\n```json\n" . json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_PARTIAL_OUTPUT_ON_ERROR) . "\n```\nGere o laudo.";
