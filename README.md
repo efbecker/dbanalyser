@@ -1,6 +1,6 @@
 # DB Oráculo Analyzer
 
-Plataforma web de diagnóstico, auditoria, tuning e análise inteligente de bancos **PostgreSQL, MySQL e MariaDB** com IA.
+Plataforma web de diagnóstico, auditoria, tuning e análise inteligente de bancos **PostgreSQL, MySQL, MariaDB, Microsoft SQL Server e Oracle** com IA.
 White-label, dark mode enterprise, coleta 100% somente leitura e laudo técnico com score de 0 a 100.
 
 ## Instalação (Debian 13+)
@@ -33,7 +33,7 @@ sudo -u www-data php /var/www/db-analyzer/bin/console user:password admin
 | Camada | Escolha | Por quê |
 |---|---|---|
 | Backend | PHP 8.4 (Debian 13) via **php-fpm** + `mpm_event` | Pacotes nativos do Debian, zero Composer, zero build; atualização via `apt` |
-| Drivers | PDO `pdo_pgsql`, `pdo_mysql`, `pdo_sqlite`; `curl`; `sodium` | Tudo em `apt`, sem binários proprietários |
+| Drivers | PDO `pdo_pgsql`, `pdo_mysql`, `pdo_dblib` (SQL Server via FreeTDS, pacote `php-sybase`), `pdo_sqlite`; `curl`; `sodium`. Oracle via `python-oracledb` em modo *thin* (ponte `bin/oracle-bridge.py`) | Sem binários proprietários: nada de Instant Client nem do driver ODBC da Microsoft. `python3-oracledb` vem do `apt` quando disponível; senão o instalador cria um venv em `/opt/db-analyzer/venv` |
 | Banco interno | SQLite 3 (WAL) em `/var/lib/db-analyzer` | Fora do DocumentRoot, portátil, backup com um arquivo |
 | Frontend | HTML5 + CSS (variáveis, Grid/Flex) + JS ES2020 vanilla + Canvas 2D | Carregamento instantâneo, sem bundler |
 | Segredos | API keys e senhas cifradas com libsodium (`app_key` em `/etc/db-analyzer/config.php`) | Vazamento do SQLite não expõe chaves |
@@ -51,6 +51,7 @@ sudo -u www-data php /var/www/db-analyzer/bin/console user:password admin
 │   ├── Core/                    Router, Auth (argon2id + anti brute-force), Session, Csrf, Database, Crypto, Audit, Markdown
 │   ├── Controllers/             Auth, Dashboard, Analyzer, Report, Ai, User, Branding, Log
 │   ├── Analyzer/                Connector (read-only), Collector (contrato), PostgresCollector, MysqlCollector,
+│   │                            MssqlCollector, OracleCollector + OracleConnection (ponte python-oracledb),
 │   │                            Sizing (veredito + postgresql.conf/my.cnf), Scorer, Prompt, MarkdownReport
 │   ├── Ai/AiClient.php          OpenAI, Anthropic, Gemini, Ollama, Groq, DeepSeek (só ext-curl)
 │   └── Views/                   templates PHP
@@ -78,6 +79,12 @@ Permissões mínimas recomendadas no banco alvo:
 CREATE ROLE oraculo LOGIN PASSWORD '...'; GRANT pg_monitor TO oraculo; GRANT CONNECT ON DATABASE app TO oraculo;
 -- MySQL / MariaDB
 CREATE USER 'oraculo'@'%' IDENTIFIED BY '...'; GRANT SELECT, PROCESS, SHOW VIEW ON *.* TO 'oraculo'@'%';
+-- SQL Server (2016+). No 2022 pode trocar VIEW SERVER STATE por VIEW SERVER PERFORMANCE STATE
+CREATE LOGIN oraculo WITH PASSWORD = '...'; GRANT VIEW SERVER STATE, VIEW ANY DEFINITION TO oraculo;
+USE app; CREATE USER oraculo FOR LOGIN oraculo; GRANT VIEW DATABASE STATE, VIEW DEFINITION TO oraculo;
+USE msdb; CREATE USER oraculo FOR LOGIN oraculo; GRANT SELECT ON dbo.backupset TO oraculo;   -- checagem de backup (opcional)
+-- Oracle (12.2+), no PDB. "Banco inicial" = service name; a lista de "bancos" são os schemas de usuário
+CREATE USER oraculo IDENTIFIED BY "..."; GRANT CREATE SESSION, SELECT_CATALOG_ROLE TO oraculo;
 ```
 
 ### Coleta do servidor via SSH (opcional)
@@ -116,6 +123,12 @@ afetam a versão (com CVSS, versão que corrige e marcação de exploração ati
   se o servidor informar só `19.0.0.0.0`, os CVEs não são verificados e o laudo avisa).
 - Limitação: vale a versão informada pelo servidor. Pacotes de distribuição com correções retroportadas (ex.: RHEL)
   podem aparecer como vulneráveis sem estar.
+
+Como o analisador garante somente leitura nos motores novos: no SQL Server (que não tem sessão READ ONLY) o coletor
+recusa qualquer instrução que não seja `SELECT`/`WITH`, lê em `READ UNCOMMITTED` com `LOCK_TIMEOUT 3000` e
+`DEADLOCK_PRIORITY LOW`; no Oracle a ponte abre `SET TRANSACTION READ ONLY`, aceita só `SELECT`/`WITH`, nunca faz
+COMMIT e usa `call_timeout`. Objetos de sistema (is_ms_shipped, schemas `sys`/`cdc`, replicação, diagramas; schemas
+`ORACLE_MAINTAINED`, lixeira `BIN$`, `MLOG$`, `DR$`, tabelas externas e containers de MV) são excluídos na origem.
 
 Para adicionar um motor novo, implemente `App\Analyzer\Collector` e registre em `Connector::collector()`.
 

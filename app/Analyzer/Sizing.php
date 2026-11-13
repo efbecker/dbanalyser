@@ -22,7 +22,12 @@ final class Sizing
             return ['verdict' => 'indeterminado', 'reasons' => ['Hardware não informado: informe vCPUs e RAM para o veredito de dimensionamento.'], 'recommended' => [], 'config' => ''];
         }
         $ramB = (int) ($ram * 1024 ** 3);
-        $rec = $engine === 'postgresql' ? self::postgres($ramB, $cpu, $disk, $settings, $dbSize, $extensions) : self::mysql($ramB, $cpu, $disk, $settings, $engine === 'mariadb');
+        $rec = match ($engine) {
+            'postgresql' => self::postgres($ramB, $cpu, $disk, $settings, $dbSize, $extensions),
+            'sqlserver'  => self::mssql($ramB, $cpu, $disk, $settings),
+            'oracle'     => self::oracle($ramB, $cpu, $disk, $settings, !empty($hw['dedicated'])),
+            default      => self::mysql($ramB, $cpu, $disk, $settings, $engine === 'mariadb'),
+        };
 
         $reasons = [];
         $mistuned = 0;
@@ -110,7 +115,9 @@ final class Sizing
         }
         $peak = $stats['max_used_connections'] ?? $stats['connections'] ?? 0;
         if ($cpu > 0 && $peak > $cpu * 8) {
-            $reasons[] = "Pico de $peak conexões para $cpu vCPUs: use pool de conexões (PgBouncer/ProxySQL).";
+            $reasons[] = "Pico de $peak conexões para $cpu vCPUs: use pool de conexões (" . match ($engine) {
+                'postgresql' => 'PgBouncer', 'sqlserver' => 'pool do driver da aplicação', 'oracle' => 'UCP/DRCP', default => 'ProxySQL',
+            } . ').';
         }
         return ['verdict' => $verdict, 'reasons' => $reasons, 'recommended' => $rec['values'], 'config' => $rec['config'], 'hardware' => $hw];
     }
@@ -200,6 +207,62 @@ final class Sizing
         }
         return ['values' => $v, 'config' => $config, 'compare' => [
             'innodb_buffer_pool_size' => [$s['innodb_buffer_pool_size']['bytes'] ?? null, $bp],
+        ]];
+    }
+
+    /**
+     * SQL Server: teto de memória deixando espaço para o SO (1 GB a cada 4 GB até 16 GB, depois 1 GB a cada 8 GB, mínimo 2 GB),
+     * MAXDOP até 8, cost threshold 50 e um arquivo de tempdb por núcleo (até 8). Saída em T-SQL (sp_configure).
+     */
+    private static function mssql(int $ram, int $cpu, string $disk, array $s): array
+    {
+        $gb = $ram / 1024 ** 3;
+        $reserve = max(2, min($gb, 16) / 4 + max(0, $gb - 16) / 8);
+        $maxMemMb = (int) max(1024, floor(($gb - $reserve) * 1024));
+        $maxdop = $cpu <= 8 ? $cpu : 8;
+        $v = [
+            'max server memory (MB)' => (string) $maxMemMb, 'max degree of parallelism' => (string) $maxdop,
+            'cost threshold for parallelism' => '50', 'optimize for ad hoc workloads' => '1', 'backup compression default' => '1',
+            'tempdb data files' => (string) min(8, max(1, $cpu)),
+        ];
+        $config = "-- SQL Server — gerado pelo DB Oráculo Analyzer\n-- Hardware: " . round($gb) . " GB RAM, $cpu vCPU, disco " . strtoupper($disk)
+            . "\n-- Revise antes de aplicar; RECONFIGURE tem efeito imediato (sem restart)\nEXEC sp_configure 'show advanced options', 1; RECONFIGURE;\n";
+        foreach ($v as $k => $val) {
+            if ($k !== 'tempdb data files') {
+                $config .= "EXEC sp_configure '$k', $val; RECONFIGURE;\n";
+            }
+        }
+        $config .= "-- tempdb: {$v['tempdb data files']} arquivos de dados do mesmo tamanho (ALTER DATABASE tempdb ADD FILE ...)\n"
+            . "-- Linux: mssql-conf set memory.memorylimitmb " . (int) floor(($gb - 1) * 1024) . "  (teto do processo, acima de max server memory)\n";
+        return ['values' => $v, 'config' => $config, 'compare' => [
+            'max server memory (MB)' => [$s['max server memory (MB)']['bytes'] ?? null, $maxMemMb * 1024 ** 2],
+        ]];
+    }
+
+    /**
+     * Oracle (ASMM): servidor dedicado → SGA 60% e PGA 20% da RAM; compartilhado → 40% e 15%.
+     * Saída em ALTER SYSTEM ... SCOPE=SPFILE (exige restart).
+     */
+    private static function oracle(int $ram, int $cpu, string $disk, array $s, bool $dedicated): array
+    {
+        $sga = (int) (floor($ram * ($dedicated ? 0.60 : 0.40) / (256 * 1024 ** 2)) * 256 * 1024 ** 2);
+        $pga = (int) (floor($ram * ($dedicated ? 0.20 : 0.15) / (128 * 1024 ** 2)) * 128 * 1024 ** 2);
+        $processes = max(300, (int) ($s['processes']['value'] ?? 300));
+        $v = [
+            'memory_target' => '0', 'sga_target' => self::mb($sga), 'sga_max_size' => self::mb($sga), 'pga_aggregate_target' => self::mb($pga),
+            'pga_aggregate_limit' => self::mb(max($pga * 2, 2 * 1024 ** 3)), 'use_large_pages' => $sga >= 8 * 1024 ** 3 ? 'ONLY' : 'TRUE',
+            'filesystemio_options' => 'SETALL', 'processes' => (string) $processes, 'open_cursors' => '1000',
+            'db_file_multiblock_read_count' => '128', 'statistics_level' => 'TYPICAL',
+        ];
+        $config = "-- Oracle (spfile) — gerado pelo DB Oráculo Analyzer\n-- Hardware: " . round($ram / 1024 ** 3) . " GB RAM, $cpu vCPU, disco " . strtoupper($disk)
+            . "\n-- SCOPE=SPFILE: vale após o próximo restart. Com use_large_pages=ONLY configure vm.nr_hugepages antes (SGA/2MB + margem).\n";
+        foreach ($v as $k => $val) {
+            $config .= "ALTER SYSTEM SET $k = " . (is_numeric($val) ? $val : (preg_match('/^\d+(MB|GB)$/', $val) ? substr($val, 0, -1) : "'$val'")) . " SCOPE = SPFILE;\n";
+        }
+        $cur = ($s['memory_target']['bytes'] ?? 0) > 0 ? null : ($s['sga_target']['bytes'] ?? null);
+        return ['values' => $v, 'config' => $config, 'compare' => [
+            'sga_target' => [$cur ?: null, $sga],
+            'pga_aggregate_target' => [$s['pga_aggregate_target']['bytes'] ?? null, $pga],
         ]];
     }
 }

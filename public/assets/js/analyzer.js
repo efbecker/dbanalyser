@@ -132,7 +132,7 @@
     ctx.beginPath(); ctx.ellipse(x, y - h / 2, w, ry, 0, 0, Math.PI * 2); ctx.stroke();
     for (const k of [-0.1, 0.25]) { ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.ellipse(x, y + h * k, w, ry, 0, 0, Math.PI); ctx.stroke(); }
     ctx.restore();
-    label({ postgresql: 'POSTGRESQL', mysql: 'MYSQL', mariadb: 'MARIADB' }[scene.engine], x, y + h / 2 + 28);
+    label({ postgresql: 'POSTGRESQL', mysql: 'MYSQL', mariadb: 'MARIADB', sqlserver: 'SQL SERVER', oracle: 'ORACLE' }[scene.engine], x, y + h / 2 + 28);
   }
 
   function label(text, x, y) {
@@ -315,9 +315,21 @@
   const dbSelect = $('#db-select');
   const status = $('#conn-status');
 
+  // O campo "Banco inicial" muda de sentido conforme o motor
+  const initialHelp = {
+    postgresql: ['(opcional; use se o pg_hba.conf só libera um banco, ex.: zabbix)', 'automático: postgres → nome do usuário'],
+    mysql: ['(opcional)', 'automático'],
+    mariadb: ['(opcional)', 'automático'],
+    sqlserver: ['(opcional; banco usado no login, se o usuário não tiver acesso ao master)', 'automático: banco padrão do login'],
+    oracle: ['(service name do PDB; os schemas aparecem como "bancos")', 'automático: FREEPDB1, ORCLPDB1, XEPDB1, ORCL…'],
+  };
   form.querySelectorAll('input[name=engine]').forEach((r) => r.addEventListener('change', () => {
     form.port.value = r.dataset.port;
     scene.engine = r.value;
+    const h = initialHelp[r.value] || initialHelp.mysql;
+    const help = document.getElementById('initial-db-help');
+    if (help) help.textContent = h[0];
+    form.initial_db.placeholder = h[1];
   }));
 
   function payload() {
@@ -357,7 +369,9 @@
     out(`✔ Handshake concluído em ${r.latency_ms} ms — ${r.databases.length} banco(s) visíveis`);
     dbSelect.innerHTML = '<option value="">— selecione —</option>' + r.databases.map((d) => `<option value="${esc(d.name)}">${esc(d.name)} (${esc(d.size)})</option>`).join('');
     dbSelect.disabled = false;
-    if (r.connected_db && r.connected_db !== 'postgres') {
+    if (data.engine === 'oracle' && r.connected_db) {
+      out(`• Service name "${r.connected_db}" — schemas de usuário listados (schemas mantidos pela Oracle ficam de fora)`);
+    } else if (data.engine === 'postgresql' && r.connected_db && r.connected_db !== 'postgres') {
       out(`• Conexão inicial feita no banco "${r.connected_db}" (restrição de pg_hba)`);
       if ([...dbSelect.options].some((o) => o.value === r.connected_db)) { dbSelect.value = r.connected_db; btnStart.disabled = false; }
     }

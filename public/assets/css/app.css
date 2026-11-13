@@ -124,6 +124,7 @@ legend { padding: 0 6px; color: #aab7cc; }
 .status-done { background: #0f2a20; color: var(--ok); } .status-running { background: #0b2329; color: var(--accent); } .status-failed { background: #2a1110; color: var(--danger); }
 .engine { background: #1a2333; color: #b8c6dc; text-transform: uppercase; }
 .engine-postgresql { color: #7cb6ff; } .engine-mysql { color: #ffb366; } .engine-mariadb { color: #d9a3ff; }
+.engine-sqlserver { color: #ff8a8a; } .engine-oracle { color: #ff9f5a; }
 .score { font-family: var(--mono); font-size: .85rem; }
 .score-good, .verdict-good { background: #0f2a20; color: var(--ok); } .score-warn, .verdict-warn { background: #3a300b; color: #ffd75e; } .score-bad, .verdict-bad { background: #2a1110; color: #ff8a80; }
 .verdict-muted { background: #1e2636; color: var(--muted); }

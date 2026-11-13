@@ -58,6 +58,9 @@ final class AnalyzerController
             [$pdo, $usedDb] = Connector::connectAny($c, Http::str('initial_db') ?: null);
             $latency = (int) ((microtime(true) - $t0) * 1000);
             $dbs = Connector::listDatabases($pdo, $c['engine']);
+            if ($c['engine'] === 'oracle') {
+                $c['service'] = $usedDb; // no Oracle o "banco" escolhido é o schema; a conexão segue no service name validado
+            }
             $_SESSION['analyzer_conn'] = Crypto::encrypt(json_encode($c));
             Audit::log('db.connect', "Conexão em {$c['engine']}://{$c['username']}@{$c['host']}:{$c['port']}", 'INFO', ['databases' => count($dbs)]);
             Http::json(['ok' => true, 'latency_ms' => $latency, 'connected_db' => $usedDb, 'databases' => array_map(fn($d) => ['name' => $d['name'], 'size' => human_bytes((int) $d['size'])], $dbs)]);
@@ -289,6 +292,8 @@ final class AnalyzerController
             $dir = match ($a['engine']) {
                 'postgresql' => $pdo->query("SELECT setting FROM pg_settings WHERE name = 'data_directory'")->fetchColumn(),
                 'mysql', 'mariadb' => $pdo->query('SELECT @@datadir')->fetchColumn(),
+                'sqlserver' => $pdo->query("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(260)) AS d")->fetchColumn(),
+                'oracle' => ($pdo->query("SELECT SUBSTR(file_name, 1, INSTR(file_name, '/', -1) - 1) AS d FROM dba_data_files WHERE ROWNUM = 1")->fetchAll()[0]['d'] ?? null),
                 default => null,
             };
             if ($dir) {
@@ -299,6 +304,8 @@ final class AnalyzerController
         return match ($a['engine']) {
             'postgresql' => '/var/lib/postgresql',
             'mysql', 'mariadb' => '/var/lib/mysql',
+            'sqlserver' => '/var/opt/mssql',
+            'oracle' => '/opt/oracle/oradata',
             default => null,
         };
     }
@@ -379,7 +386,16 @@ final class AnalyzerController
             str_contains($m, 'Connection refused') => 'Conexão recusada: verifique host, porta e firewall.',
             str_contains($m, 'timeout'), str_contains($m, 'timed out') => 'Tempo de conexão esgotado: host inacessível ou firewall bloqueando.',
             str_contains($m, 'could not translate host'), str_contains($m, 'getaddrinfo') => 'Não foi possível resolver o nome do host.',
-            str_contains($m, 'could not find driver') => 'Driver PDO ausente no servidor (php-pgsql/php-mysql).',
+            str_contains($m, 'could not find driver (pdo_dblib)') => 'Driver do SQL Server ausente: instale php8.4-sybase (FreeTDS) e reinicie o php-fpm, ou rode o install.sh de novo.',
+            str_contains($m, 'python-oracledb não instalado'), str_contains($m, 'driver Oracle') => 'Driver do Oracle ausente: rode o install.sh de novo (instala python3-oracledb, modo thin, sem Instant Client).',
+            str_contains($m, 'could not find driver') => 'Driver PDO ausente no servidor (php-pgsql/php-mysql/php-sybase).',
+            str_contains($m, 'Login failed'), str_contains($m, 'ORA-01017') => 'Usuário ou senha recusados pelo servidor de banco.',
+            str_contains($m, 'ORA-01045') => 'O usuário não tem CREATE SESSION no Oracle.',
+            str_contains($m, 'ORA-28000') => 'Conta bloqueada no Oracle (ORA-28000).',
+            str_contains($m, 'Nenhum service name padrão') => $m,
+            str_contains($m, 'ORA-12514'), str_contains($m, 'DPY-6001') => 'Service name não registrado no listener: informe o service name correto (ex.: ORCLPDB1) em "Banco inicial".',
+            str_contains($m, 'DPY-6005'), str_contains($m, 'ORA-12541') => 'Nenhum listener Oracle respondeu: verifique host, porta (1521) e firewall.',
+            str_contains($m, 'Unable to connect'), str_contains($m, 'Adaptive Server is unavailable') => 'Não foi possível conectar ao SQL Server: verifique host, porta (1433), firewall e se o TCP/IP está habilitado.',
             default => mb_substr($m, 0, 300),
         };
     }

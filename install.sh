@@ -56,15 +56,29 @@ ok "${PRETTY_NAME:-Debian}"
 step "Instalando pacotes (Apache2, PHP-FPM, drivers PDO, SQLite)"
 apt-get update -qq
 PKGS=(apache2 php-fpm php-cli php-pgsql php-mysql php-sqlite3 php-curl php-mbstring php-xml php-intl php-opcache
+      php-sybase python3 python3-venv
       sqlite3 git ca-certificates curl ssl-cert postgresql-client mariadb-client openssh-client sshpass)
 if [[ -n "$LE_EMAIL" ]]; then PKGS+=(certbot); fi
 apt-get install -y -qq --no-install-recommends "${PKGS[@]}" >/dev/null
 PHPV="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
 php -r 'exit(version_compare(PHP_VERSION, "8.3.0", ">=") ? 0 : 1);' || die "PHP $PHPV encontrado; requer 8.3+"
-for ext in pdo_pgsql pdo_mysql pdo_sqlite curl mbstring sodium; do
+for ext in pdo_pgsql pdo_mysql pdo_dblib pdo_sqlite curl mbstring sodium; do
   php -m | grep -qi "^${ext}$" || die "Extensão PHP ausente: $ext"
 done
-ok "PHP $PHPV com pdo_pgsql, pdo_mysql, pdo_sqlite, curl, mbstring, sodium"
+ok "PHP $PHPV com pdo_pgsql, pdo_mysql, pdo_dblib (SQL Server via FreeTDS), pdo_sqlite, curl, mbstring, sodium"
+
+# Oracle: não há driver PHP aberto (OCI8/PDO_OCI exigem o Instant Client proprietário). Usamos python-oracledb
+# em modo thin (Apache 2.0/UPL, protocolo Oracle Net em Python puro, sem Instant Client), pelo apt quando o
+# pacote existe e funciona; senão, num venv isolado em /opt/db-analyzer/venv via pip.
+ORA_CHECK='import oracledb, sys; sys.exit(0 if int(oracledb.__version__.split(".")[0]) >= 1 else 1)'
+if apt-get install -y -qq --no-install-recommends python3-oracledb >/dev/null 2>&1 && /usr/bin/python3 -I -c "$ORA_CHECK" 2>/dev/null; then
+  ok "Driver Oracle: python3-oracledb $(/usr/bin/python3 -I -c 'import oracledb; print(oracledb.__version__)' 2>/dev/null) (apt, modo thin)"
+else
+  [[ -x /opt/db-analyzer/venv/bin/python3 ]] || python3 -m venv /opt/db-analyzer/venv
+  /opt/db-analyzer/venv/bin/pip install -q --upgrade 'oracledb>=2,<4' >/dev/null
+  /opt/db-analyzer/venv/bin/python3 -I -c "$ORA_CHECK" || die "Falha ao instalar python-oracledb"
+  ok "Driver Oracle: python-oracledb $(/opt/db-analyzer/venv/bin/python3 -I -c 'import oracledb; print(oracledb.__version__)') (venv em /opt/db-analyzer/venv, modo thin)"
+fi
 
 # -----------------------------------------------------------------------------
 step "Obtendo código ($REPO_URL @ $BRANCH) em $APP_DIR"

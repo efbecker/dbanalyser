@@ -75,7 +75,7 @@ abstract class Collector
         return in_array($schema, $ctx['schemas'], true) || (!str_contains($object, '.') && in_array($this->database, $ctx['schemas'], true));
     }
 
-    public function __construct(protected PDO $pdo, protected string $database)
+    public function __construct(protected PDO|OracleConnection $pdo, protected string $database)
     {
     }
 
