@@ -6,7 +6,9 @@ $score = (int) $a['score'];
 $scoreClass = $score >= 80 ? 'good' : ($score >= 50 ? 'warn' : 'bad');
 $tables = $m['schemas']['tables'] ?? [];
 $verdictClass = ['adequado' => 'good', 'superdimensionado' => 'warn', 'mal tunado' => 'warn', 'subdimensionado' => 'bad'][$tuning['verdict'] ?? ''] ?? 'muted';
-$sqlAll = implode("\n\n", array_filter(array_column($findings, 'fix_sql')));
+$sqlAll = implode("\n\n", array_filter(array_column(array_filter($findings, fn($f) => $f['category'] !== 'os'), 'fix_sql')));
+$os = $m['os'] ?? null;
+$osp = $os['parsed'] ?? [];
 $ctxApp = $m['connect']['app'] ?? null;
 $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
 ?>
@@ -45,6 +47,7 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
     <button data-tab="idx">Índices</button>
     <button data-tab="q">Queries &amp; Performance</button>
     <button data-tab="tune">Dimensionamento &amp; Tuning</button>
+    <button data-tab="os">Sistema Operacional</button>
     <button data-tab="sql">Scripts SQL</button>
   </nav>
 
@@ -107,7 +110,7 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
 
   <section class="card tab-pane" data-pane="tune">
     <h3>Veredito: <span class="verdict verdict-<?= $verdictClass ?>"><?= e(mb_strtoupper($tuning['verdict'] ?? 'n/d')) ?></span></h3>
-    <?php if ($hw): ?><p class="small muted">Hardware informado: <?= e(($hw['vcpu'] ?? '?') . ' vCPU @ ' . ($hw['clock_ghz'] ?? '?') . ' GHz · ' . ($hw['ram_gb'] ?? '?') . ' GB RAM · disco ' . strtoupper($hw['disk'] ?? '?')) ?></p><?php endif; ?>
+    <?php if ($hw): ?><p class="small muted">Hardware <?= ($hw['source'] ?? '') === 'ssh' ? 'detectado via SSH' : 'informado' ?>: <?= e(($hw['vcpu'] ?? '?') . ' vCPU @ ' . ($hw['clock_ghz'] ?? '?') . ' GHz · ' . ($hw['ram_gb'] ?? '?') . ' GB RAM · disco ' . strtoupper($hw['disk'] ?? '?')) ?></p><?php endif; ?>
     <?php if (!empty($tuning['reasons'])): ?><ul><?php foreach ($tuning['reasons'] as $r): ?><li><?= e($r) ?></li><?php endforeach; ?></ul><?php endif; ?>
     <?= View::partial('reports/_findings', ['list' => $byCat(['sizing'])]) ?>
     <div class="grid two mt">
@@ -131,6 +134,78 @@ $ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
         <?php else: ?><p class="muted">Informe vCPU e RAM na próxima análise para gerar o bloco de configuração.</p><?php endif; ?>
       </div>
     </div>
+  </section>
+
+  <section class="card tab-pane" data-pane="os">
+    <?php if (!$os): ?>
+      <p class="muted">Coleta do sistema operacional não habilitada nesta análise. Marque "Coletar via SSH" no analisador para incluir memória, swap, vmstat, OOM, sysctl e disco no laudo.</p>
+    <?php elseif (!empty($os['error'])): ?>
+      <div class="alert alert-warning">A coleta via SSH em <code><?= e($os['target'] ?? '') ?></code> falhou: <?= e($os['error']) ?></div>
+    <?php else: $mem = $osp['mem'] ?? []; $vs = $osp['vmstat'] ?? null; ?>
+      <p class="small muted">Coletado via SSH em <code><?= e($os['target']) ?></code> (somente leitura)<?= $os['fingerprint'] ? ' · host key <code>' . e($os['fingerprint']) . '</code>' : '' ?></p>
+      <?= View::partial('reports/_findings', ['list' => $byCat(['os'])]) ?>
+      <div class="grid two mt">
+        <div>
+          <h3>Servidor</h3>
+          <table class="table"><tbody>
+            <?php foreach (array_filter([
+              'Sistema' => $osp['distro'] ?? null, 'Kernel' => $osp['kernel'] ?? null, 'Virtualização' => $osp['virtualization'] ?? null,
+              'Uptime' => isset($osp['uptime_days']) ? $osp['uptime_days'] . ' dias' : null,
+              'CPU' => trim(($osp['vcpu'] ?? '?') . ' vCPU · ' . ($osp['cpu_model'] ?? '')),
+              'Load (1/5/15 min)' => isset($osp['load']) ? "{$osp['load']['1m']} / {$osp['load']['5m']} / {$osp['load']['15m']}" : null,
+              'vmstat (média)' => $vs ? "us {$vs['us']}% · sy {$vs['sy']}% · wa {$vs['wa']}% · id {$vs['id']}%" . ($vs['st'] !== null ? " · st {$vs['st']}%" : '') . " · si/so {$vs['si']}/{$vs['so']}" : null,
+              'Transparent Huge Pages' => isset($osp['thp']['enabled']) ? $osp['thp']['enabled'] . ' (defrag ' . ($osp['thp']['defrag'] ?? '?') . ')' : null,
+              'OOM no kernel' => ($osp['oom_access'] ?? true) ? count($osp['oom_events'] ?? []) . ' evento(s)' : 'sem permissão para ler',
+            ]) as $k => $v): ?><tr><td><?= e($k) ?></td><td class="right"><?= e($v) ?></td></tr><?php endforeach; ?>
+          </tbody></table>
+          <h3 class="mt">Memória</h3>
+          <table class="table"><tbody>
+            <?php foreach (['total' => 'Total', 'available' => 'Disponível', 'cached' => 'Cache de páginas', 'shmem' => 'Shared memory', 'dirty' => 'Dirty',
+              'swap_total' => 'Swap total', 'swap_used' => 'Swap usada', 'committed_as' => 'Committed_AS', 'commit_limit' => 'CommitLimit', 'anon_hugepages' => 'AnonHugePages'] as $k => $l):
+              if (!isset($mem[$k])) continue; ?>
+              <tr><td><?= e($l) ?></td><td class="right"><?= human_bytes($mem[$k]) ?><?= $k === 'available' && isset($mem['available_pct']) ? ' <span class="muted small">(' . $mem['available_pct'] . '%)</span>' : '' ?></td></tr>
+            <?php endforeach; ?>
+            <?php if (isset($mem['hugepages_total'])): ?><tr><td>HugePages (total/livres)</td><td class="right"><?= (int) $mem['hugepages_total'] ?> / <?= (int) $mem['hugepages_free'] ?></td></tr><?php endif; ?>
+          </tbody></table>
+          <h3 class="mt">sysctl vm.*</h3>
+          <table class="table"><tbody>
+            <?php foreach ($osp['vm'] ?? [] as $k => $v): ?><tr><td><code>vm.<?= e($k) ?></code></td><td class="right"><?= e((string) $v) ?></td></tr><?php endforeach; ?>
+          </tbody></table>
+        </div>
+        <div>
+          <h3>Disco</h3>
+          <?php if (!empty($osp['data_dir']['size'])): $dd = $osp['data_dir']; ?>
+            <p class="small">Diretório de dados <code><?= e($dd['path']) ?></code> em <code><?= e($dd['mount']) ?></code> (<?= e(($dd['fstype'] ?? '?') . ($dd['mount_options'] ? ', ' . $dd['mount_options'] : '')) ?>):
+              <strong><?= (int) $dd['used_pct'] ?>%</strong> usado, <?= human_bytes($dd['avail']) ?> livres de <?= human_bytes($dd['size']) ?>.</p>
+          <?php endif; ?>
+          <div class="table-wrap"><table class="table"><thead><tr><th>Montagem</th><th class="right">Tamanho</th><th class="right">Uso</th><th class="right">Inodes</th></tr></thead><tbody>
+            <?php foreach ($osp['filesystems'] ?? [] as $fs): ?>
+              <tr><td><code><?= e($fs['mount']) ?></code> <span class="muted small"><?= e($fs['filesystem']) ?></span></td><td class="right"><?= human_bytes($fs['size']) ?></td>
+              <td class="right <?= $fs['used_pct'] >= 90 ? 'bad' : ($fs['used_pct'] >= 80 ? 'warn' : '') ?>"><?= (int) $fs['used_pct'] ?>%</td><td class="right"><?= $fs['inodes_pct'] !== null ? (int) $fs['inodes_pct'] . '%' : '—' ?></td></tr>
+            <?php endforeach; ?>
+          </tbody></table></div>
+          <?php if (!empty($osp['disks'])): ?>
+            <table class="table"><thead><tr><th>Dispositivo</th><th>Tipo</th><th class="right">Tamanho</th></tr></thead><tbody>
+              <?php foreach ($osp['disks'] as $d): ?><tr><td><?= e($d['name']) ?> <span class="muted small"><?= e((string) $d['model']) ?></span></td><td><?= str_starts_with($d['name'], 'nvme') ? 'NVMe' : ($d['rotational'] ? 'rotacional' : 'SSD') ?></td><td class="right"><?= $d['size'] ? human_bytes($d['size']) : '—' ?></td></tr><?php endforeach; ?>
+            </tbody></table>
+          <?php endif; ?>
+          <h3 class="mt">Processos por memória</h3>
+          <table class="table"><thead><tr><th>Processo</th><th class="right">RSS</th><th class="right">CPU</th></tr></thead><tbody>
+            <?php foreach ($osp['top_processes'] ?? [] as $pr): ?><tr><td><code><?= e($pr['command']) ?></code></td><td class="right"><?= human_bytes($pr['rss']) ?></td><td class="right"><?= e((string) $pr['cpu_pct']) ?>%</td></tr><?php endforeach; ?>
+          </tbody></table>
+          <?php if (!empty($osp['oom_events'])): ?>
+            <h3 class="mt">Eventos de OOM</h3>
+            <pre class="code small"><?= e(implode("\n", $osp['oom_events'])) ?></pre>
+          <?php endif; ?>
+        </div>
+      </div>
+      <details class="mt"><summary>Saída bruta dos comandos</summary>
+        <?php foreach ($os['raw'] ?? [] as $k => $x): ?>
+          <h4><?= e(\App\Analyzer\OsCollector::COMMANDS[$k][0] ?? $k) ?> <span class="muted small">rc=<?= (int) $x['rc'] ?></span></h4>
+          <pre class="code small"><?= e($x['out']) ?></pre>
+        <?php endforeach; ?>
+      </details>
+    <?php endif; ?>
   </section>
 
   <section class="card tab-pane" data-pane="sql">

@@ -9,8 +9,11 @@ namespace App\Analyzer;
  */
 final class Sizing
 {
-    /** @param array{vcpu?:int,clock_ghz?:float,ram_gb?:float,disk?:string,dedicated?:bool} $hw */
-    public static function evaluate(string $engine, array $settings, array $stats, array $hw, int $dbSize, array $extensions = []): array
+    /**
+     * @param array{vcpu?:int,clock_ghz?:float,ram_gb?:float,disk?:string,dedicated?:bool} $hw
+     * @param array $os coleta do SO via SSH já interpretada (OsCollector::parse), quando disponível
+     */
+    public static function evaluate(string $engine, array $settings, array $stats, array $hw, int $dbSize, array $extensions = [], array $os = []): array
     {
         $ram = (float) ($hw['ram_gb'] ?? 0);
         $cpu = (int) ($hw['vcpu'] ?? 0);
@@ -67,6 +70,42 @@ final class Sizing
             }
             if ($verdict === 'adequado' && $mistuned > 0) {
                 $verdict = 'mal tunado';
+            }
+        }
+        // Evidências do SO (via SSH): pressão real de memória, CPU e disco
+        if ($os) {
+            $memPressure = [];
+            if (!empty($os['oom_events'])) {
+                $memPressure[] = count($os['oom_events']) . ' evento(s) de OOM killer no log do kernel';
+            }
+            $vs = $os['vmstat'] ?? null;
+            if ($vs && ($vs['si'] > 0 || $vs['so'] > 0)) {
+                $memPressure[] = "paginação ativa para swap (si/so {$vs['si']}/{$vs['so']} KB/s)";
+            }
+            if (isset($os['mem']['available_pct']) && $os['mem']['available_pct'] < 10) {
+                $memPressure[] = "apenas {$os['mem']['available_pct']}% de memória disponível";
+            }
+            if ($memPressure) {
+                $reasons[] = 'SO: ' . implode('; ', $memPressure) . '.';
+                // Com buffers corretos, pressão de memória real é falta de RAM; se há parâmetros fora, corrigir primeiro.
+                if ($verdict === 'adequado' || $verdict === 'superdimensionado') {
+                    $verdict = 'subdimensionado';
+                }
+            } elseif ($verdict === 'subdimensionado' && isset($os['mem']['available_pct']) && $os['mem']['available_pct'] > 40 && empty($os['oom_events'])) {
+                $reasons[] = "SO: {$os['mem']['available_pct']}% da RAM ainda disponível e sem OOM; antes de comprar hardware, aumente o cache do banco.";
+                $verdict = 'mal tunado';
+            }
+            if ($vs && $vs['wa'] >= 20) {
+                $reasons[] = "SO: iowait médio de {$vs['wa']}% durante a coleta (disco é gargalo).";
+            }
+            if ($cpu > 0 && isset($os['load']['5m']) && $os['load']['5m'] > $cpu * 1.5) {
+                $reasons[] = "SO: load de 5 min {$os['load']['5m']} para $cpu vCPU (CPU saturada).";
+                if ($verdict === 'adequado') {
+                    $verdict = 'subdimensionado';
+                }
+            }
+            if (isset($os['data_dir']['used_pct']) && $os['data_dir']['used_pct'] >= 85) {
+                $reasons[] = "SO: diretório de dados com {$os['data_dir']['used_pct']}% de uso.";
             }
         }
         $peak = $stats['max_used_connections'] ?? $stats['connections'] ?? 0;

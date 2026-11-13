@@ -366,6 +366,53 @@
 
   dbSelect.addEventListener('change', () => { btnStart.disabled = !dbSelect.value; });
 
+  /* ---------- SSH (opcional) ---------- */
+  const sshOn = $('#ssh-enabled');
+  const sshFields = $('#ssh-fields');
+  const sshStatus = $('#ssh-status');
+  const btnSsh = $('#btn-ssh');
+  let sshTested = false;
+  const syncSsh = () => {
+    sshFields.hidden = !sshOn.checked;
+    const mode = form.ssh_auth.value;
+    form.querySelectorAll('[data-ssh]').forEach((el) => { el.hidden = el.dataset.ssh !== mode; });
+  };
+  sshOn.addEventListener('change', syncSsh);
+  form.ssh_auth.addEventListener('change', syncSsh);
+  syncSsh();
+  ['ssh_host', 'ssh_port', 'ssh_user', 'ssh_auth'].forEach((n) => form[n].addEventListener('change', () => { sshTested = false; }));
+
+  btnSsh.addEventListener('click', async () => {
+    if (!form.ssh_user.value) { form.ssh_user.focus(); return; }
+    btnSsh.disabled = true;
+    sshStatus.className = 'test-result';
+    sshStatus.textContent = '⏳ Conectando via SSH…';
+    const target = `${form.ssh_user.value}@${form.ssh_host.value || form.host.value || '?'}:${form.ssh_port.value || 22}`;
+    out(`oraculo@analyzer:~$ ssh ${target} --read-only --detect-hardware`, 't-dim');
+    const r = await api('/api/analyzer/ssh', payload());
+    btnSsh.disabled = false;
+    if (!r.ok) {
+      sshTested = false;
+      sshStatus.className = 'test-result err';
+      sshStatus.textContent = '✘ ' + r.error;
+      out('✘ ' + r.error);
+      return;
+    }
+    sshTested = true;
+    const hw = r.hardware || {};
+    if (hw.vcpu) form.vcpu.value = hw.vcpu;
+    if (hw.clock_ghz) form.clock_ghz.value = String(hw.clock_ghz).replace('.', ',');
+    if (hw.ram_gb) form.ram_gb.value = String(hw.ram_gb).replace('.', ',');
+    if (hw.disk) form.disk.value = hw.disk;
+    const i = r.info || {};
+    sshStatus.className = 'test-result ok';
+    sshStatus.textContent = `✔ SSH ok em ${r.latency_ms} ms · ${[hw.vcpu && hw.vcpu + ' vCPU', i.ram && i.ram + ' RAM', hw.disk && hw.disk.toUpperCase(), i.virt].filter(Boolean).join(' · ')} — hardware preenchido`;
+    out(`✔ SSH ok · ${i.kernel || ''}`);
+    if (i.cpu) out(`  ↳ ${i.cpu}`, 't-dim');
+    if (r.fingerprint) out(`  ↳ host key fixada: ${r.fingerprint}`, 't-dim');
+    form.ssh_password.value = ''; form.ssh_key.value = ''; form.ssh_passphrase.value = ''; // não mantém segredos no DOM
+  });
+
   btnStart.addEventListener('click', async () => {
     const data = payload();
     if (!data.database) return;
@@ -373,6 +420,11 @@
     btnList.disabled = true;
     resetStages();
     out(`oraculo@analyzer:~$ analyze --database=${data.database} --safe-mode`, 't-dim');
+    if (data.ssh_enabled && !sshTested && !data.ssh_password && !data.ssh_key) {
+      out('✘ Coleta via SSH marcada: informe a senha/chave SSH ou clique em "Testar SSH".');
+      btnStart.disabled = false; btnList.disabled = false;
+      return;
+    }
     const s = await api('/api/analyzer/start', data);
     if (s.error) { out('✘ ' + s.error); btnList.disabled = false; return; }
 
@@ -381,7 +433,7 @@
       li.className = 'running';
       out(`→ [${s.stages[stage]}]`);
       if (stage === 'connect') setPhase('connecting', '⟲ Reconectando em modo somente leitura');
-      if (['schemas', 'indexes', 'queries', 'sizing'].includes(stage)) setPhase('scanning', '⟟ ' + s.stages[stage]);
+      if (['schemas', 'indexes', 'queries', 'sizing', 'os'].includes(stage)) setPhase('scanning', '⟟ ' + s.stages[stage]);
       if (stage === 'ai') setPhase('ai');
       if (stage === 'report') setPhase('scanning', '✎ Gerando laudo técnico');
 

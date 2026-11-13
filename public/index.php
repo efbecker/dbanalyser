@@ -36,6 +36,7 @@ $r->get('/analyzer', [AnalyzerController::class, 'index']);
 $r->post('/api/analyzer/databases', [AnalyzerController::class, 'listDatabases']);
 $r->post('/api/analyzer/start', [AnalyzerController::class, 'start']);
 $r->post('/api/analyzer/step', [AnalyzerController::class, 'step']);
+$r->post('/api/analyzer/ssh', [AnalyzerController::class, 'testSsh']);
 
 // Relatórios
 $r->get('/reports', [ReportController::class, 'index']);

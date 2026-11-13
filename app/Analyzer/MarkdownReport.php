@@ -20,7 +20,7 @@ final class MarkdownReport
         $md .= "| Motor | {$a['engine']} |\n| Servidor | {$a['host']}:{$a['port']} |\n| Versão | " . str_replace('|', '/', (string) $a['server_version']) . " |\n";
         $md .= '| Score | **' . (int) $a['score'] . "/100** |\n| Dimensionamento | " . strtoupper($t['verdict'] ?? 'n/d') . " |\n";
         if ($hw) {
-            $md .= '| Hardware | ' . ($hw['vcpu'] ?? '?') . ' vCPU @ ' . ($hw['clock_ghz'] ?? '?') . ' GHz, ' . ($hw['ram_gb'] ?? '?') . ' GB RAM, ' . strtoupper($hw['disk'] ?? '?') . " |\n";
+            $md .= '| Hardware' . (($hw['source'] ?? '') === 'ssh' ? ' (detectado via SSH)' : '') . ' | ' . ($hw['vcpu'] ?? '?') . ' vCPU @ ' . ($hw['clock_ghz'] ?? '?') . ' GHz, ' . ($hw['ram_gb'] ?? '?') . ' GB RAM, ' . strtoupper($hw['disk'] ?? '?') . " |\n";
         }
         $md .= "\n";
         if (!empty($a['ai_report_md'])) {
@@ -31,7 +31,24 @@ final class MarkdownReport
             $md .= '- **[' . strtoupper($x['severity']) . "] {$x['title']}** — {$x['detail']}\n";
         }
         $md .= "\n## Configuração de referência\n\n```ini\n" . ($t['config'] ?? '') . "```\n\n";
-        $sql = array_filter(array_column($f, 'fix_sql'));
+        $os = $m['os']['parsed'] ?? null;
+        if ($os) {
+            $md .= "## Sistema operacional (coletado via SSH em {$m['os']['target']})\n\n| Item | Valor |\n|---|---|\n";
+            foreach (OsCollector::humanRows($os) as $k => $v) {
+                $md .= "| $k | " . str_replace(['|', "\n"], ['/', ' '], $v) . " |\n";
+            }
+            $md .= "\n";
+            if (!empty($os['oom_events'])) {
+                $md .= "Eventos de OOM no kernel:\n\n```\n" . implode("\n", $os['oom_events']) . "\n```\n\n";
+            }
+            $osFix = array_filter(array_column(array_filter($f, fn($x) => $x['category'] === 'os'), 'fix_sql'));
+            if ($osFix) {
+                $md .= "Ajustes de SO sugeridos:\n\n```ini\n" . implode("\n\n", $osFix) . "\n```\n\n";
+            }
+        } elseif (!empty($m['os']['error'])) {
+            $md .= "> Coleta do SO via SSH falhou: {$m['os']['error']}\n\n";
+        }
+        $sql = array_filter(array_column(array_filter($f, fn($x) => $x['category'] !== 'os'), 'fix_sql'));
         if ($sql) {
             $md .= "## Scripts SQL de correção\n\n```sql\n" . implode("\n\n", $sql) . "\n```\n\n";
         }

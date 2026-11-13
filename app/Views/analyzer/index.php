@@ -31,7 +31,27 @@
       <button type="button" class="btn btn-primary btn-block" id="btn-list">🔌 Conectar e Listar Bancos</button>
       <div class="test-result" id="conn-status"></div>
 
-      <h2 class="mt">2 · Banco e hardware</h2>
+      <h2 class="mt">2 · Servidor do banco via SSH <small class="muted">(opcional)</small></h2>
+      <label class="check"><input type="checkbox" name="ssh_enabled" value="1" id="ssh-enabled"> Coletar memória, swap, CPU, disco e OOM do sistema operacional</label>
+      <div id="ssh-fields" hidden>
+        <p class="small muted">Somente leitura: o analisador roda apenas uma lista fixa de comandos de consulta (free, vmstat, /proc/meminfo, sysctl vm.*, dmesg, df…), sem sudo.
+          Use um usuário comum; para ver eventos de OOM ele precisa estar no grupo <code>adm</code>. As credenciais ficam só na sua sessão, cifradas, e não são gravadas.</p>
+        <div class="row">
+          <label class="grow">Host SSH<input name="ssh_host" placeholder="mesmo host do banco"></label>
+          <label class="w-port">Porta<input name="ssh_port" type="number" min="1" max="65535" value="22"></label>
+        </div>
+        <div class="row">
+          <label class="grow">Usuário SSH<input name="ssh_user" autocomplete="off"></label>
+          <label class="grow">Autenticação<select name="ssh_auth" id="ssh-auth"><option value="password">Senha</option><option value="key">Chave privada</option></select></label>
+        </div>
+        <label data-ssh="password">Senha SSH<input name="ssh_password" type="password" autocomplete="new-password"></label>
+        <label data-ssh="key" hidden>Chave privada <small class="muted">(OpenSSH/PEM)</small><textarea name="ssh_key" rows="4" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+        <label data-ssh="key" hidden>Passphrase da chave <small class="muted">(se houver)</small><input name="ssh_passphrase" type="password" autocomplete="new-password"></label>
+        <button type="button" class="btn btn-ghost btn-block" id="btn-ssh">🔐 Testar SSH e detectar hardware</button>
+        <div class="test-result" id="ssh-status"></div>
+      </div>
+
+      <h2 class="mt">3 · Banco e hardware</h2>
       <label>Database<select name="database" id="db-select" disabled><option value="">— conecte primeiro —</option></select></label>
       <div class="row">
         <label>vCPUs<input name="vcpu" type="number" min="1" value="<?= e($infra['default_vcpu'] ?? '') ?>"></label>

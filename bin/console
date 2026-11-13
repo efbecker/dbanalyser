@@ -10,6 +10,7 @@ declare(strict_types=1);
  *   php bin/console user:create <login> [--role=ADMIN|CLIENT] [--password=SENHA]
  *   php bin/console key:generate                      imprime uma nova app_key
  *   php bin/console logs:prune [--days=180]
+ *   php bin/console ssh:forget <host> [--port=22]     esquece a chave SSH fixada de um servidor (após reinstalação legítima)
  */
 if (PHP_SAPI !== 'cli') {
     exit(1);
@@ -80,6 +81,17 @@ switch ($cmd) {
 
     case 'key:generate':
         echo Crypto::generateKey() . PHP_EOL;
+        break;
+
+    case 'ssh:forget':
+        $host = $pos[0] ?? null;
+        if (!$host) {
+            fwrite(STDERR, "Informe o host.\n");
+            exit(1);
+        }
+        $ok = \App\Analyzer\SshClient::forget($host, (int) ($opt['port'] ?? 22));
+        Audit::log('ssh.forget', "Chave SSH de $host removida via CLI", 'WARNING', [], $sys);
+        echo $ok ? "Chave de $host removida; a próxima conexão fixa a nova chave.\n" : "Nenhuma chave registrada para $host.\n";
         break;
 
     case 'logs:prune':

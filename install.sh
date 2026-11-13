@@ -56,7 +56,7 @@ ok "${PRETTY_NAME:-Debian}"
 step "Instalando pacotes (Apache2, PHP-FPM, drivers PDO, SQLite)"
 apt-get update -qq
 PKGS=(apache2 php-fpm php-cli php-pgsql php-mysql php-sqlite3 php-curl php-mbstring php-xml php-intl php-opcache
-      sqlite3 git ca-certificates curl ssl-cert postgresql-client mariadb-client)
+      sqlite3 git ca-certificates curl ssl-cert postgresql-client mariadb-client openssh-client sshpass)
 if [[ -n "$LE_EMAIL" ]]; then PKGS+=(certbot); fi
 apt-get install -y -qq --no-install-recommends "${PKGS[@]}" >/dev/null
 PHPV="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
