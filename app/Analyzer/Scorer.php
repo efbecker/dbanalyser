@@ -5,7 +5,7 @@ namespace App\Analyzer;
 
 final class Scorer
 {
-    private const WEIGHT = ['critical' => 15, 'high' => 7, 'medium' => 3, 'low' => 1];
+    private const WEIGHT = ['critical' => 15, 'high' => 7, 'medium' => 3, 'low' => 1, 'info' => 0];
     private const CAP = 25; // perda máxima por categoria, evita que uma única categoria zere o score
 
     public static function score(array $findings, array $tuning): int
@@ -23,7 +23,7 @@ final class Scorer
 
     public static function sort(array $findings): array
     {
-        $order = ['critical' => 0, 'high' => 1, 'medium' => 2, 'low' => 3];
+        $order = ['critical' => 0, 'high' => 1, 'medium' => 2, 'low' => 3, 'info' => 4];
         usort($findings, fn($a, $b) => ($order[$a['severity']] ?? 9) <=> ($order[$b['severity']] ?? 9));
         return $findings;
     }

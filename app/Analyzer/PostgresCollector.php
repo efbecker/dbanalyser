@@ -5,7 +5,30 @@ namespace App\Analyzer;
 
 final class PostgresCollector extends Collector
 {
-    private const SYS = "n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname NOT LIKE 'pg_temp%' AND n.nspname NOT LIKE 'pg_toast_temp%'";
+    /**
+     * Exclui catálogos, schemas internos de extensões (TimescaleDB, pg_cron, PostGIS topology/tiger, pg_repack, pglogical)
+     * e qualquer schema que pertença a uma extensão (pg_depend deptype 'e'). Esses objetos não são do usuário.
+     */
+    private const SYS = "n.nspname NOT IN ('pg_catalog','information_schema','pg_toast','cron','topology','tiger','tiger_data','repack','pglogical')
+        AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname NOT LIKE '\\_timescaledb%' AND n.nspname NOT LIKE 'timescaledb\\_%'
+        AND NOT EXISTS (SELECT 1 FROM pg_depend xd WHERE xd.classid = 'pg_namespace'::regclass AND xd.objid = n.oid AND xd.deptype = 'e')";
+
+    /** Relação (tabela/índice) que é membro de uma extensão, ex.: spatial_ref_sys do PostGIS. */
+    private static function notExtMember(string $alias): string
+    {
+        return "NOT EXISTS (SELECT 1 FROM pg_depend xm WHERE xm.classid = 'pg_class'::regclass AND xm.objid = $alias.oid AND xm.deptype = 'e')";
+    }
+
+    protected function tableNames(): array
+    {
+        return array_map(fn($r) => [$r['s'], $r['t']], $this->q("SELECT n.nspname AS s, c.relname AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r','p') AND " . self::SYS . " LIMIT 5000"));
+    }
+
+    protected function extensions(): array
+    {
+        return array_column($this->tryQ('extensões', 'SELECT extname, extversion FROM pg_extension ORDER BY extname') ?? [], 'extversion', 'extname');
+    }
 
     public function connect(): array
     {
@@ -16,7 +39,15 @@ final class PostgresCollector extends Collector
         $this->log('✔ Handshake OK — ' . $v['version']);
         $this->log('✔ Sessão em modo READ ONLY, statement_timeout ativo');
         $this->log('• Banco ' . $this->database . ' — ' . human_bytes((int) $v['db_size']) . ($v['replica'] ? ' (réplica)' : ''));
-        return $this->result([
+        $ctx = $this->context();
+        $ext = array_diff_key($ctx['extensions'], ['plpgsql' => 1]);
+        if ($ext) {
+            $this->log('• Extensões: ' . implode(', ', array_map(fn($k, $v) => "$k $v", array_keys($ext), $ext)));
+        }
+        if ($ctx['app']) {
+            $this->log("ℹ Aplicação reconhecida: {$ctx['app']} (schema " . implode(', ', $ctx['schemas']) . ') — estrutura tratada como do fornecedor');
+        }
+        return $this->result(['app' => $ctx['app'], 'app_schemas' => $ctx['schemas'], 'extensions' => $ctx['extensions'],
             'version' => $v['version'], 'version_num' => (int) $v['num'], 'db_size' => (int) $v['db_size'],
             'uptime_s' => (int) $v['uptime_s'], 'user' => $v['usr'], 'replica' => (bool) $v['replica'],
         ], ['db_size' => (int) $v['db_size']]);
@@ -32,7 +63,7 @@ final class PostgresCollector extends Collector
                    EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p') AS has_pk
               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
               LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-             WHERE c.relkind IN ('r','p') AND " . self::SYS . "
+             WHERE c.relkind IN ('r','p') AND " . self::SYS . " AND " . self::notExtMember('c') . "
              ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 2000");
 
         $fks = $this->q("
@@ -75,7 +106,7 @@ final class PostgresCollector extends Collector
                 $this->finding('medium', 'statistics', "Estatísticas nunca coletadas em $fq", 'O planner pode escolher planos ruins sem estatísticas.', "ANALYZE $qi;", $fq);
             }
             if ($rows > 100000 && (int) $t['seq_scan'] > 10 * max(1, (int) $t['idx_scan'])) {
-                $this->finding('medium', 'queries', "Leituras sequenciais predominantes em $fq",
+                $this->finding('medium', 'indexes', "Leituras sequenciais predominantes em $fq",
                     "seq_scan={$t['seq_scan']} vs idx_scan=" . (int) $t['idx_scan'] . '. Provável falta de índice para filtros frequentes.', null, $fq);
             }
             $out[] = [
@@ -90,7 +121,7 @@ final class PostgresCollector extends Collector
         $smells = $this->tryQ('tipos de dados', "
             SELECT n.nspname AS schema, c.relname AS table_name, a.attname AS col, format_type(a.atttypid, a.atttypmod) AS type
               FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped AND " . self::SYS . "
+             WHERE c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped AND " . self::SYS . " AND " . self::notExtMember('c') . "
                AND ( (format_type(a.atttypid, a.atttypmod) IN ('real','double precision') AND a.attname ~* '(price|preco|valor|amount|total|saldo|money)')
                   OR (format_type(a.atttypid, a.atttypmod) = 'timestamp without time zone')
                   OR (a.attname ~* '(_id|^id)$' AND format_type(a.atttypid, a.atttypmod) ~* '^(text|character varying)') )
@@ -123,7 +154,7 @@ final class PostgresCollector extends Collector
                    ix.indkey::text AS keys, ix.indrelid::bigint AS relid
               FROM pg_index ix JOIN pg_class i ON i.oid = ix.indexrelid JOIN pg_class t ON t.oid = ix.indrelid
               JOIN pg_namespace n ON n.oid = t.relnamespace LEFT JOIN pg_stat_user_indexes s ON s.indexrelid = ix.indexrelid
-             WHERE " . self::SYS . " ORDER BY pg_relation_size(i.oid) DESC");
+             WHERE " . self::SYS . " AND " . self::notExtMember('t') . " ORDER BY pg_relation_size(i.oid) DESC");
         $this->log('• ' . count($idx) . ' índices encontrados');
 
         // Duplicados (assinatura idêntica)
@@ -164,14 +195,21 @@ final class PostgresCollector extends Collector
                 }
             }
         }
-        // Nunca utilizados
+        // Nunca utilizados — só com janela de estatísticas confiável (>= 7 dias)
+        $win = $this->q("SELECT d.stats_reset, EXTRACT(EPOCH FROM now() - COALESCE(d.stats_reset, pg_postmaster_start_time()))::bigint AS age_s
+                           FROM pg_stat_database d WHERE d.datname = current_database()")[0];
+        $windowDays = intdiv((int) $win['age_s'], 86400);
+        $since = $win['stats_reset'] ? 'desde ' . substr((string) $win['stats_reset'], 0, 16) : 'nunca resetadas';
         $unused = array_values(array_filter($idx, fn($i) => !$i['is_unique'] && !$i['is_pk'] && (int) $i['scans'] === 0));
-        foreach (array_slice($unused, 0, 50) as $u) {
+        if ($windowDays < 7) {
+            $this->log("ℹ Estatísticas de uso com janela curta ($since, ~{$windowDays} dia(s)): índices não usados não serão apontados");
+        }
+        foreach ($windowDays < 7 ? [] : array_slice($unused, 0, 50) as $u) {
             if ((int) $u['bytes'] < 1024 * 1024) {
                 continue;
             }
             $this->finding('medium', 'indexes', "Índice nunca utilizado: {$u['schema']}.{$u['name']}",
-                'idx_scan = 0 desde o último reset de estatísticas. Ocupa ' . human_bytes((int) $u['bytes']) . '. Confirme também nas réplicas antes de remover.',
+                "idx_scan = 0 (estatísticas $since, janela de ~{$windowDays} dias). Ocupa " . human_bytes((int) $u['bytes']) . '. Confirme também nas réplicas antes de remover.',
                 'DROP INDEX CONCURRENTLY ' . self::qi($u['schema']) . '.' . self::qi($u['name']) . ';', "{$u['schema']}.{$u['name']}");
         }
 
@@ -215,9 +253,18 @@ final class PostgresCollector extends Collector
                  WHERE d.datname = current_database() ORDER BY total_exec_time DESC LIMIT 15");
             $this->log('✔ pg_stat_statements ' . $ext[0]['extversion'] . ': ' . count($top ?? []) . ' queries mais custosas');
         } else {
+            // Preserva as bibliotecas já carregadas (ex.: timescaledb) — sobrescrever quebraria a extensão
+            $raw = $this->tryQ('shared_preload_libraries', "SELECT current_setting('shared_preload_libraries') AS v")[0]['v'] ?? null;
+            $preload = array_values(array_filter(array_map('trim', explode(',', (string) $raw))));
+            $loaded = in_array('pg_stat_statements', $preload, true);
+            $hint = $raw === null
+                ? "-- postgresql.conf (requer restart): ACRESCENTE pg_stat_statements à lista atual de shared_preload_libraries,\n-- sem remover as bibliotecas existentes (ex.: 'timescaledb,pg_stat_statements')\n"
+                : ($loaded ? '' : "-- postgresql.conf (requer restart; preserva as bibliotecas atuais):\n-- shared_preload_libraries = '" . implode(',', array_merge($preload, ['pg_stat_statements'])) . "'\n");
             $this->finding('medium', 'observability', 'pg_stat_statements não habilitado',
-                'Sem ele não é possível identificar as queries mais custosas historicamente.',
-                "-- postgresql.conf: shared_preload_libraries = 'pg_stat_statements' (requer restart)\nCREATE EXTENSION IF NOT EXISTS pg_stat_statements;");
+                'Sem ele não é possível identificar as queries mais custosas historicamente.'
+                . ($loaded ? ' A biblioteca já está carregada; falta apenas criar a extensão no banco.' : ' Mantenha as bibliotecas já presentes em shared_preload_libraries.'),
+                $hint
+                . 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;');
         }
         foreach ($top ?? [] as $t) {
             if ((float) $t['mean_ms'] > 500) {
@@ -255,7 +302,8 @@ final class PostgresCollector extends Collector
         $names = ['shared_buffers', 'work_mem', 'maintenance_work_mem', 'effective_cache_size', 'max_connections', 'random_page_cost',
             'effective_io_concurrency', 'max_worker_processes', 'max_parallel_workers', 'max_parallel_workers_per_gather', 'wal_buffers',
             'min_wal_size', 'max_wal_size', 'checkpoint_completion_target', 'autovacuum', 'autovacuum_max_workers', 'default_statistics_target',
-            'huge_pages', 'jit', 'idle_in_transaction_session_timeout', 'shared_preload_libraries'];
+            'huge_pages', 'jit', 'idle_in_transaction_session_timeout', 'shared_preload_libraries', 'autovacuum_work_mem',
+            'timescaledb.max_background_workers', 'max_parallel_maintenance_workers'];
         $rows = $this->q('SELECT name, setting, unit, source FROM pg_settings WHERE name = ANY(?::text[])', ['{' . implode(',', $names) . '}']);
         $settings = [];
         foreach ($rows as $r) {
@@ -270,7 +318,7 @@ final class PostgresCollector extends Collector
             'cache_hit_ratio' => $hit, 'temp_files' => (int) $db['temp_files'], 'temp_bytes' => (int) $db['temp_bytes'],
             'deadlocks' => (int) $db['deadlocks'], 'connections' => $conns, 'max_connections' => (int) ($settings['max_connections']['value'] ?? 100),
             'rollback_ratio' => ((int) $db['xact_commit'] + (int) $db['xact_rollback']) > 0 ? round($db['xact_rollback'] * 100 / ($db['xact_commit'] + $db['xact_rollback']), 2) : 0,
-            'stats_reset' => $db['stats_reset'],
+            'stats_reset' => $db['stats_reset'] ?? 'nunca (contadores acumulados desde a criação do cluster)',
         ];
         $this->log('✔ Cache hit ratio: ' . ($hit ?? 'n/d') . '% • conexões ' . $conns . '/' . $metrics['max_connections']);
         if ($hit !== null && $hit < 95) {

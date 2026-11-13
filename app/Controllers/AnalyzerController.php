@@ -165,7 +165,7 @@ final class AnalyzerController
         $findings = Scorer::sort(json_decode((string) $a['findings_json'], true) ?: []);
         $hw = json_decode((string) $a['hardware_json'], true) ?: [];
         $flavor = $a['engine'] === 'postgresql' ? 'postgresql' : ($metrics['connect']['flavor'] ?? $a['engine']);
-        $tuning = Sizing::evaluate($flavor, $metrics['sizing']['settings'] ?? [], $metrics['sizing']['stats'] ?? [], $hw, (int) ($metrics['connect']['db_size'] ?? 0));
+        $tuning = Sizing::evaluate($flavor, $metrics['sizing']['settings'] ?? [], $metrics['sizing']['stats'] ?? [], $hw, (int) ($metrics['connect']['db_size'] ?? 0), $metrics['connect']['extensions'] ?? []);
         $score = Scorer::score($findings, $tuning);
         $upd = ['tuning_json' => json_encode($tuning, JSON_UNESCAPED_UNICODE), 'score' => $score, 'findings_json' => json_encode($findings, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)];
         $log = ['• Veredito heurístico: ' . mb_strtoupper($tuning['verdict']), '• Score técnico calculado: ' . $score . '/100'];

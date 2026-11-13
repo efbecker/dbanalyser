@@ -7,6 +7,8 @@ $scoreClass = $score >= 80 ? 'good' : ($score >= 50 ? 'warn' : 'bad');
 $tables = $m['schemas']['tables'] ?? [];
 $verdictClass = ['adequado' => 'good', 'superdimensionado' => 'warn', 'mal tunado' => 'warn', 'subdimensionado' => 'bad'][$tuning['verdict'] ?? ''] ?? 'muted';
 $sqlAll = implode("\n\n", array_filter(array_column($findings, 'fix_sql')));
+$ctxApp = $m['connect']['app'] ?? null;
+$ctxExt = array_diff_key($m['connect']['extensions'] ?? [], ['plpgsql' => 1]);
 ?>
 <?php if ($a['status'] === 'failed'): ?><div class="alert alert-error">Análise falhou: <?= e($a['error']) ?></div><?php endif; ?>
 <div class="report-head card">
@@ -17,11 +19,15 @@ $sqlAll = implode("\n\n", array_filter(array_column($findings, 'fix_sql')));
     <p class="small">Analisado por <strong><?= e($a['username']) ?></strong> em <?= e($a['started_at']) ?> UTC
       <?php if ($a['ai_model']): ?> · IA: <code><?= e($a['ai_provider'] . ' / ' . $a['ai_model']) ?></code><?php endif; ?></p>
     <div class="sev-row">
-      <?php foreach (['critical' => 'Críticos', 'high' => 'Altos', 'medium' => 'Médios', 'low' => 'Baixos'] as $k => $l): ?>
+      <?php foreach (['critical' => 'Críticos', 'high' => 'Altos', 'medium' => 'Médios', 'low' => 'Baixos', 'info' => 'Informativos'] as $k => $l): ?>
         <span class="sev sev-<?= $k ?>"><?= (int) ($sev[$k] ?? 0) ?> <?= $l ?></span>
       <?php endforeach; ?>
-      <span class="verdict verdict-<?= $verdictClass ?>">Servidor: <?= e(mb_strtoupper($tuning['verdict'] ?? 'n/d')) ?></span>
+      <span class="verdict verdict-<?= $verdictClass ?>">Dimensionamento: <?= e(mb_strtoupper($tuning['verdict'] ?? 'n/d')) ?></span>
     </div>
+    <?php if ($ctxApp || $ctxExt): ?><p class="small muted">
+      <?php if ($ctxApp): ?>Aplicação reconhecida: <strong><?= e($ctxApp) ?></strong> (estrutura do fornecedor: achados de schema são informativos e sem script). <?php endif; ?>
+      <?php if ($ctxExt): ?>Extensões: <?= e(implode(', ', array_map(fn($k, $v) => "$k $v", array_keys($ctxExt), $ctxExt))) ?>.<?php endif; ?>
+    </p><?php endif; ?>
   </div>
   <div class="report-actions">
     <a class="btn btn-ghost btn-sm" href="<?= e(url("/reports/{$a['id']}/export/pdf")) ?>" target="_blank">PDF</a>
@@ -44,7 +50,7 @@ $sqlAll = implode("\n\n", array_filter(array_column($findings, 'fix_sql')));
 
   <section class="card tab-pane active" data-pane="sum">
     <?php if ($a['ai_report_md']): ?>
-      <div class="md"><?= Markdown::render($a['ai_report_md']) ?></div>
+      <div class="md"><?= Markdown::render(ltrim((string) preg_replace('/\A\s*#\s+[^\n]*\n/', '', $a['ai_report_md']))) ?></div>
     <?php else: ?>
       <p class="muted">Sem laudo de IA (nenhum provedor configurado ou falha na chamada). Achados determinísticos mais relevantes:</p>
       <?= View::partial('reports/_findings', ['list' => array_slice($findings, 0, 15)]) ?>

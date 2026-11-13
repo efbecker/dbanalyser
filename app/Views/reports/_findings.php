@@ -1,6 +1,6 @@
 <?php
 /** @var array $list */
-$sevLabel = ['critical' => 'CRÍTICO', 'high' => 'ALTO', 'medium' => 'MÉDIO', 'low' => 'BAIXO'];
+$sevLabel = ['critical' => 'CRÍTICO', 'high' => 'ALTO', 'medium' => 'MÉDIO', 'low' => 'BAIXO', 'info' => 'INFO'];
 if (!$list): ?>
   <p class="muted">✔ Nenhum problema encontrado nesta categoria.</p>
 <?php else: ?>

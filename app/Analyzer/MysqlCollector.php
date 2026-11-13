@@ -16,6 +16,11 @@ final class MysqlCollector extends Collector
         parent::__construct($pdo, $database);
     }
 
+    protected function tableNames(): array
+    {
+        return array_map(fn($r) => [$this->database, $r['t']], $this->q("SELECT TABLE_NAME AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'", [$this->database]));
+    }
+
     private function qid(string $s): string
     {
         return self::qi($s, '`');
@@ -45,7 +50,11 @@ final class MysqlCollector extends Collector
             $this->log('ℹ Servidor é MariaDB — regras ajustadas automaticamente');
         }
         $this->log('• Banco ' . $this->database . ' — ' . human_bytes($size));
-        return $this->result([
+        $ctx = $this->context();
+        if ($ctx['app']) {
+            $this->log("ℹ Aplicação reconhecida: {$ctx['app']} — estrutura tratada como do fornecedor");
+        }
+        return $this->result(['app' => $ctx['app'], 'app_schemas' => $ctx['schemas'],
             'version' => $version, 'flavor' => $isMaria ? 'mariadb' : 'mysql', 'db_size' => $size,
             'uptime_s' => (int) ($this->status['Uptime'] ?? 0), 'read_only' => ($this->vars['read_only'] ?? 'OFF') === 'ON',
         ], ['db_size' => $size]);

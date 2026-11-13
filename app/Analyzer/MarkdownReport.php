@@ -18,13 +18,13 @@ final class MarkdownReport
         $md .= "> $brand · análise #{$a['id']} · {$a['started_at']}\n\n";
         $md .= "| Item | Valor |\n|---|---|\n";
         $md .= "| Motor | {$a['engine']} |\n| Servidor | {$a['host']}:{$a['port']} |\n| Versão | " . str_replace('|', '/', (string) $a['server_version']) . " |\n";
-        $md .= '| Score | **' . (int) $a['score'] . "/100** |\n| Veredito | " . strtoupper($t['verdict'] ?? 'n/d') . " |\n";
+        $md .= '| Score | **' . (int) $a['score'] . "/100** |\n| Dimensionamento | " . strtoupper($t['verdict'] ?? 'n/d') . " |\n";
         if ($hw) {
             $md .= '| Hardware | ' . ($hw['vcpu'] ?? '?') . ' vCPU @ ' . ($hw['clock_ghz'] ?? '?') . ' GHz, ' . ($hw['ram_gb'] ?? '?') . ' GB RAM, ' . strtoupper($hw['disk'] ?? '?') . " |\n";
         }
         $md .= "\n";
         if (!empty($a['ai_report_md'])) {
-            $md .= "## Análise da IA ({$a['ai_provider']} / {$a['ai_model']})\n\n" . trim($a['ai_report_md']) . "\n\n";
+            $md .= "## Análise da IA ({$a['ai_provider']} / {$a['ai_model']})\n\n" . trim(\App\Core\Markdown::embed($a['ai_report_md'])) . "\n\n";
         }
         $md .= "## Achados (" . count($f) . ")\n\n";
         foreach ($f as $x) {

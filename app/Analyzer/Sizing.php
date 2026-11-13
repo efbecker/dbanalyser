@@ -10,7 +10,7 @@ namespace App\Analyzer;
 final class Sizing
 {
     /** @param array{vcpu?:int,clock_ghz?:float,ram_gb?:float,disk?:string,dedicated?:bool} $hw */
-    public static function evaluate(string $engine, array $settings, array $stats, array $hw, int $dbSize): array
+    public static function evaluate(string $engine, array $settings, array $stats, array $hw, int $dbSize, array $extensions = []): array
     {
         $ram = (float) ($hw['ram_gb'] ?? 0);
         $cpu = (int) ($hw['vcpu'] ?? 0);
@@ -19,7 +19,7 @@ final class Sizing
             return ['verdict' => 'indeterminado', 'reasons' => ['Hardware não informado: informe vCPUs e RAM para o veredito de dimensionamento.'], 'recommended' => [], 'config' => ''];
         }
         $ramB = (int) ($ram * 1024 ** 3);
-        $rec = $engine === 'postgresql' ? self::postgres($ramB, $cpu, $disk, $settings) : self::mysql($ramB, $cpu, $disk, $settings, $engine === 'mariadb');
+        $rec = $engine === 'postgresql' ? self::postgres($ramB, $cpu, $disk, $settings, $dbSize, $extensions) : self::mysql($ramB, $cpu, $disk, $settings, $engine === 'mariadb');
 
         $reasons = [];
         $mistuned = 0;
@@ -47,6 +47,28 @@ final class Sizing
             $verdict = 'superdimensionado';
             $reasons[] = 'Banco ocupa ' . human_bytes($dbSize) . ' (< 5% da RAM) com cache praticamente perfeito.';
         }
+        if ($engine === 'postgresql') {
+            $mc = (int) ($settings['max_connections']['value'] ?? 0);
+            $wm = (int) ($settings['work_mem']['bytes'] ?? 0);
+            $sb = (int) ($settings['shared_buffers']['bytes'] ?? 0);
+            if ($mc > 0 && $wm > 0 && $sb + $mc * $wm > $ramB) {
+                $mistuned++;
+                $reasons[] = sprintf('max_connections (%d) × work_mem (%s) + shared_buffers excede a RAM (%s): risco de OOM em pico.', $mc, human_bytes($wm), human_bytes($ramB));
+            }
+            $avw = (int) ($settings['autovacuum_max_workers']['value'] ?? 0);
+            $avRaw = (int) ($settings['autovacuum_work_mem']['bytes'] ?? -1);
+            $avMem = $avRaw > 0 ? $avRaw : (int) ($settings['maintenance_work_mem']['bytes'] ?? 0);
+            if ($avw > 0 && $avMem > 0 && $avw * $avMem > $ramB * 0.5) {
+                $mistuned++;
+                $reasons[] = sprintf('autovacuum_max_workers (%d) × memória por worker (%s) pode passar de 50%% da RAM.', $avw, human_bytes($avMem));
+            }
+            if ($cpu > 0 && $avw > $cpu * 2) {
+                $reasons[] = "autovacuum_max_workers ($avw) alto para $cpu vCPUs.";
+            }
+            if ($verdict === 'adequado' && $mistuned > 0) {
+                $verdict = 'mal tunado';
+            }
+        }
         $peak = $stats['max_used_connections'] ?? $stats['connections'] ?? 0;
         if ($cpu > 0 && $peak > $cpu * 8) {
             $reasons[] = "Pico de $peak conexões para $cpu vCPUs: use pool de conexões (PgBouncer/ProxySQL).";
@@ -59,7 +81,7 @@ final class Sizing
         return $bytes >= 1024 ** 3 && $bytes % (1024 ** 3) === 0 ? ($bytes / 1024 ** 3) . 'GB' : max(1, (int) round($bytes / 1024 ** 2)) . 'MB';
     }
 
-    private static function postgres(int $ram, int $cpu, string $disk, array $s): array
+    private static function postgres(int $ram, int $cpu, string $disk, array $s, int $dbSize = 0, array $ext = []): array
     {
         $maxConn = max(20, (int) ($s['max_connections']['value'] ?? 100));
         $shared = (int) min($ram * 0.25, 64 * 1024 ** 3);
@@ -67,18 +89,51 @@ final class Sizing
         $maint = (int) min($ram / 16, 2 * 1024 ** 3);
         $work = (int) max(4 * 1024 ** 2, ($ram - $shared) / ($maxConn * 3));
         $ssd = $disk !== 'hdd';
+        $avWorkers = max(3, min($cpu, 6));
+        // Bibliotecas carregadas hoje são preservadas (timescaledb, pg_cron, etc.) e pg_stat_statements é adicionada
+        $preloadKnown = isset($s['shared_preload_libraries']);
+        $preload = array_values(array_filter(array_map('trim', explode(',', (string) ($s['shared_preload_libraries']['value'] ?? '')))));
+        // Extensões que exigem preload (quando o usuário não pode ler a configuração, inferimos pelas extensões instaladas)
+        foreach (['timescaledb', 'pg_cron', 'pg_partman_bgw', 'pg_squeeze', 'pglogical', 'citus'] as $lib) {
+            if (isset($ext[$lib]) && !in_array($lib, $preload, true)) {
+                $lib === 'citus' ? array_unshift($preload, $lib) : $preload[] = $lib;
+            }
+        }
+        if (!in_array('pg_stat_statements', $preload, true)) {
+            $preload[] = 'pg_stat_statements';
+        }
+        $tsdb = in_array('timescaledb', $preload, true);
+        $parallel = $cpu;
+        // TimescaleDB: max_worker_processes = background workers da extensão + paralelos + 3 (recomendação do timescaledb-tune)
+        $tsBgw = (int) ($s['timescaledb.max_background_workers']['value'] ?? 16);
+        $workers = $tsdb ? $tsBgw + $parallel + 3 : max(8, $cpu);
+        // WAL proporcional ao banco: bancos pequenos não precisam de max_wal_size grande
+        $small = $dbSize > 0 && $dbSize < 10 * 1024 ** 3;
         $v = [
+            'shared_preload_libraries' => implode(',', $preload),
             'shared_buffers' => self::mb($shared), 'effective_cache_size' => self::mb($cache), 'maintenance_work_mem' => self::mb($maint),
-            'work_mem' => self::mb($work), 'wal_buffers' => '16MB', 'min_wal_size' => '1GB', 'max_wal_size' => $ram >= 8 * 1024 ** 3 ? '8GB' : '4GB',
+            'autovacuum_work_mem' => self::mb((int) max(64 * 1024 ** 2, min($maint, 512 * 1024 ** 2) / 2)),
+            'work_mem' => self::mb($work), 'wal_buffers' => '16MB', 'min_wal_size' => $small ? '512MB' : '1GB',
+            'max_wal_size' => $small ? '2GB' : ($ram >= 8 * 1024 ** 3 ? '8GB' : '4GB'),
             'checkpoint_completion_target' => '0.9', 'random_page_cost' => $ssd ? '1.1' : '4', 'effective_io_concurrency' => $ssd ? '200' : '2',
-            'max_worker_processes' => (string) max(8, $cpu), 'max_parallel_workers' => (string) $cpu,
+            'max_worker_processes' => (string) $workers, 'max_parallel_workers' => (string) $parallel,
             'max_parallel_workers_per_gather' => (string) max(1, intdiv($cpu, 2)), 'max_parallel_maintenance_workers' => (string) max(1, intdiv($cpu, 2)),
+            'autovacuum_max_workers' => (string) $avWorkers,
             'default_statistics_target' => '100', 'huge_pages' => $ram >= 32 * 1024 ** 3 ? 'try' : 'off',
             'idle_in_transaction_session_timeout' => '10min',
         ];
+        if ($tsdb) {
+            $v['timescaledb.max_background_workers'] = (string) $tsBgw;
+        }
         $config = "# postgresql.conf — gerado pelo DB Oráculo Analyzer\n# Hardware: " . round($ram / 1024 ** 3) . " GB RAM, $cpu vCPU, disco " . strtoupper($disk) . "\n";
         foreach ($v as $k => $val) {
             $config .= str_pad($k, 36) . "= " . (is_numeric($val) ? $val : "'$val'") . "\n";
+        }
+        if (!$preloadKnown) {
+            $config .= "# ATENÇÃO: o usuário da análise não pode ler shared_preload_libraries; confira a lista atual e só ACRESCENTE itens\n";
+        }
+        if ($tsdb) {
+            $config .= "# TimescaleDB detectado: max_worker_processes = timescaledb.max_background_workers + max_parallel_workers + 3\n";
         }
         return ['values' => $v, 'config' => $config, 'compare' => [
             'shared_buffers' => [$s['shared_buffers']['bytes'] ?? null, $shared],

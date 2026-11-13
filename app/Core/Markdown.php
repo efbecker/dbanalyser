@@ -9,6 +9,13 @@ namespace App\Core;
  */
 final class Markdown
 {
+    /** Remove o título H1 inicial (o laudo já tem cabeçalho) e rebaixa os demais títulos um nível. */
+    public static function embed(string $md): string
+    {
+        $md = preg_replace('/\A\s*#\s+[^\n]*\n/', '', ltrim($md));
+        return preg_replace('/^(#{1,5})(\s)/m', '#$1$2', $md);
+    }
+
     public static function render(string $md): string
     {
         $lines = preg_split('/\R/', str_replace("\t", '    ', $md));
@@ -96,7 +103,10 @@ final class Markdown
         }, $s);
         $s = preg_replace('/\*\*(.+?)\*\*/', '<strong>$1</strong>', $s);
         $s = preg_replace('/(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])/', '<em>$1</em>', $s);
+        $s = preg_replace('/(?<![\w_])_(?![\s_])(.+?)(?<![\s_])_(?![\w_])/u', '<em>$1</em>', $s);
         $s = preg_replace('/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/', '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>', $s);
+        // Links internos/relativos (ex.: [Seção](#secao)) viram só o texto
+        $s = preg_replace('/\[([^\]]+)\]\((?!https?:)[^\s)]*\)/', '$1', $s);
         return preg_replace_callback("/\x00(\d+)\x00/", fn($m) => $codes[(int) $m[1]], $s);
     }
 }
