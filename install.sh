@@ -174,8 +174,9 @@ render_vhost() {
       -e "s#__CERT__#$CERT#g" -e "s#__KEY__#$KEY#g" \
       "$APP_DIR/deploy/apache/db-analyzer.conf" > /etc/apache2/sites-available/db-analyzer.conf
 }
-cat > /etc/apache2/conf-available/db-analyzer-hardening.conf <<'CONF'
+cat > /etc/apache2/conf-available/db-analyzer-hardening.conf <<CONF
 # Endurecimento global (DB Oráculo Analyzer)
+ServerName $DOMAIN
 ServerTokens Prod
 ServerSignature Off
 TraceEnable Off
@@ -218,7 +219,8 @@ ok "Backup diário em $DATA_DIR/backups"
 echo -e "\n${G}════════════════════════════════════════════════════════════${N}"
 echo -e "${G} DB Oráculo Analyzer instalado — $(git -C "$APP_DIR" log -1 --format='%h %s')${N}"
 echo -e "${G}════════════════════════════════════════════════════════════${N}"
-echo -e " URL ........: https://$DOMAIN/"
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+echo -e " URL ........: https://$DOMAIN/${IP:+  (ou https://$IP/)}"
 if [[ -f "$CRED_FILE" ]]; then
   echo -e " Login ......: admin  (senha em ${Y}$CRED_FILE${N}; troca obrigatória no 1º acesso)"
 fi
