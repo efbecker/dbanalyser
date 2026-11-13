@@ -36,7 +36,7 @@ final class AiController
         return [
             'provider' => $provider, 'model' => Http::str('model') ?: null, 'base_url' => $base ?: null,
             'temperature' => max(0, min(1.5, (float) Http::str('temperature', '0.2'))),
-            'max_tokens' => max(256, min(32000, (int) Http::str('max_tokens', '4096'))),
+            'max_tokens' => max(256, min(64000, (int) Http::str('max_tokens', '16000'))),
         ];
     }
 
@@ -123,7 +123,7 @@ final class AiController
             $key = (string) Crypto::decrypt($row['api_key_enc'] ?? null);
         }
         try {
-            $client = AiClient::fromProfile(['provider' => $provider, 'model' => $in['model'] ?? '', 'api_key' => $key, 'base_url' => $in['base_url'] ?? '', 'max_tokens' => 64]);
+            $client = AiClient::fromProfile(['provider' => $provider, 'model' => $in['model'] ?? '', 'api_key' => $key, 'base_url' => $in['base_url'] ?? '', 'max_tokens' => 1024]);
             $r = $client->chat('Responda apenas com: OK', 'Teste de conectividade do DB Oráculo Analyzer.');
             Audit::log('ai.test', "Teste de IA OK ($provider / {$client->model})", 'INFO', ['latency_ms' => $r['latency_ms']]);
             Http::json(['ok' => true, 'model' => $client->model, 'latency_ms' => $r['latency_ms'], 'reply' => mb_substr(trim($r['text']), 0, 120)]);

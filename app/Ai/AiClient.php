@@ -13,7 +13,7 @@ final class AiClient
 {
     public const PROVIDERS = [
         'openai'    => ['label' => 'OpenAI',             'model' => 'gpt-4.1-mini',             'base' => 'https://api.openai.com/v1',                         'key' => true],
-        'anthropic' => ['label' => 'Anthropic Claude',   'model' => 'claude-sonnet-5-5',         'base' => 'https://api.anthropic.com/v1',                      'key' => true],
+        'anthropic' => ['label' => 'Anthropic Claude',   'model' => 'claude-opus-5-5',           'base' => 'https://api.anthropic.com/v1',                      'key' => true],
         'gemini'    => ['label' => 'Google Gemini',      'model' => 'gemini-2.5-flash',          'base' => 'https://generativelanguage.googleapis.com/v1beta',  'key' => true],
         'ollama'    => ['label' => 'Ollama / Local',     'model' => 'llama3.1',                  'base' => 'http://127.0.0.1:11434/v1',                         'key' => false],
         'groq'      => ['label' => 'Groq',               'model' => 'llama-3.3-70b-versatile',   'base' => 'https://api.groq.com/openai/v1',                    'key' => true],
@@ -81,7 +81,29 @@ final class AiClient
             'temperature' => $this->temperature,
             'max_tokens'  => $this->maxTokens,
         ];
-        $j = $this->post($this->baseUrl . '/chat/completions', $body, $headers);
+        // Modelos de raciocínio (ex.: OpenAI o-series/gpt-5) recusam temperature e max_tokens:
+        // ajusta o corpo conforme a mensagem de erro e tenta de novo (no máximo 2 vezes).
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                $j = $this->post($this->baseUrl . '/chat/completions', $body, $headers);
+                break;
+            } catch (\RuntimeException $e) {
+                $m = $e->getMessage();
+                $changed = false;
+                if (isset($body['temperature']) && stripos($m, 'temperature') !== false) {
+                    unset($body['temperature']);
+                    $changed = true;
+                }
+                if (isset($body['max_tokens']) && stripos($m, 'max_completion_tokens') !== false) {
+                    $body['max_completion_tokens'] = $body['max_tokens'];
+                    unset($body['max_tokens']);
+                    $changed = true;
+                }
+                if (!$changed || $attempt >= 2) {
+                    throw $e;
+                }
+            }
+        }
         return [
             'text'       => (string) ($j['choices'][0]['message']['content'] ?? ''),
             'tokens_in'  => (int) ($j['usage']['prompt_tokens'] ?? 0),
@@ -91,22 +113,31 @@ final class AiClient
 
     private function anthropic(string $system, string $user): array
     {
+        // API version 2026-10-21: temperature/top_p/top_k não são mais aceitos (400 em todos os modelos).
+        // Os modelos atuais pensam de forma adaptativa e o raciocínio consome max_tokens,
+        // por isso garantimos uma folga mínima de saída.
         $j = $this->post($this->baseUrl . '/messages', [
-            'model'       => $this->model,
-            'system'      => $system,
-            'max_tokens'  => $this->maxTokens,
-            'temperature' => $this->temperature,
-            'messages'    => [['role' => 'user', 'content' => $user]],
+            'model'      => $this->model,
+            'system'     => $system,
+            'max_tokens' => max(16000, $this->maxTokens),
+            'messages'   => [['role' => 'user', 'content' => $user]],
         ], [
             'Content-Type: application/json',
             'x-api-key: ' . $this->apiKey,
-            'anthropic-version: 2023-06-01',
+            'anthropic-version: 2026-10-21',
         ]);
+        $stop = $j['stop_reason'] ?? null;
+        if ($stop === 'refusal') {
+            throw new \RuntimeException('O modelo recusou a solicitação (' . ($j['stop_details']['category'] ?? 'sem categoria') . ').');
+        }
         $text = '';
         foreach ($j['content'] ?? [] as $block) {
             if (($block['type'] ?? '') === 'text') {
                 $text .= $block['text'];
             }
+        }
+        if ($text === '' && $stop === 'max_tokens') {
+            throw new \RuntimeException('A resposta atingiu o limite de tokens antes de terminar. Aumente "Máx. tokens de saída".');
         }
         return ['text' => $text, 'tokens_in' => (int) ($j['usage']['input_tokens'] ?? 0), 'tokens_out' => (int) ($j['usage']['output_tokens'] ?? 0)];
     }
