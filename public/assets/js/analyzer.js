@@ -332,10 +332,13 @@
     form.initial_db.placeholder = h[1];
   }));
 
+  // Token da conexão validada nesta aba: outra aba conectada em outro servidor não interfere
+  let connToken = '';
   function payload() {
     const fd = new FormData(form);
     const o = Object.fromEntries(fd);
     o.dedicated = fd.has('dedicated');
+    o.conn_token = connToken;
     return o;
   }
 
@@ -362,6 +365,7 @@
       out('✘ ' + r.error);
       return;
     }
+    connToken = r.conn_token || '';
     setPhase('connected', `● Conectado · ${r.latency_ms} ms`);
     animateCount(odo('latency'), r.latency_ms);
     status.className = 'test-result ok';

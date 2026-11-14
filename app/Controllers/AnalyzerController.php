@@ -62,13 +62,44 @@ final class AnalyzerController
             if ($c['engine'] === 'oracle') {
                 $c['service'] = $usedDb; // no Oracle o "banco" escolhido é o schema; a conexão segue no service name validado
             }
-            $_SESSION['analyzer_conn'] = Crypto::encrypt(json_encode($c));
+            $token = self::saveConn($c);
             Audit::log('db.connect', "Conexão em {$c['engine']}://{$c['username']}@{$c['host']}:{$c['port']}", 'INFO', ['databases' => count($dbs)]);
-            Http::json(['ok' => true, 'latency_ms' => $latency, 'connected_db' => $usedDb, 'databases' => array_map(fn($d) => ['name' => $d['name'], 'size' => human_bytes((int) $d['size'])], $dbs)]);
+            Http::json(['ok' => true, 'conn_token' => $token, 'latency_ms' => $latency, 'connected_db' => $usedDb, 'databases' => array_map(fn($d) => ['name' => $d['name'], 'size' => human_bytes((int) $d['size'])], $dbs)]);
         } catch (\Throwable $e) {
             Audit::log('db.connect_failed', 'Falha de conexão: ' . $e->getMessage(), 'WARNING', ['host' => $c['host'] ?? null]);
             Http::json(['ok' => false, 'error' => self::friendly($e)], 200);
         }
+    }
+
+    /**
+     * Cada "Conectar" ganha um token próprio: abas diferentes (mesmo login) conectadas em servidores diferentes
+     * não se sobrescrevem. Guarda as 8 conexões mais recentes da sessão, cifradas.
+     */
+    private static function saveConn(array $c): string
+    {
+        $token = bin2hex(random_bytes(12));
+        $all = $_SESSION['analyzer_conns'] ?? [];
+        $all[$token] = ['conn' => Crypto::encrypt(json_encode($c)), 'ssh' => null];
+        $_SESSION['analyzer_conns'] = array_slice($all, -8, null, true);
+        return $token;
+    }
+
+    /** Conexão (e SSH testado) da aba que fez a requisição, pelo token devolvido no "Conectar". */
+    private static function connSlot(): ?array
+    {
+        $t = (string) (Http::input()['conn_token'] ?? '');
+        return $t !== '' ? ($_SESSION['analyzer_conns'][$t] ?? null) : null;
+    }
+
+    private static function setSsh(?string $enc): ?string
+    {
+        $t = (string) (Http::input()['conn_token'] ?? '');
+        $key = $t !== '' && isset($_SESSION['analyzer_conns'][$t]) ? $t : '_';
+        if ($key === '_') {
+            $_SESSION['analyzer_conns']['_'] ??= ['conn' => null, 'ssh' => null];
+        }
+        $_SESSION['analyzer_conns'][$key]['ssh'] = $enc;
+        return $enc;
     }
 
     /** Credenciais SSH do formulário (ou as já testadas nesta sessão), cifradas para guardar na sessão. */
@@ -79,16 +110,18 @@ final class AnalyzerController
             return null;
         }
         $fresh = ($in['ssh_password'] ?? '') !== '' || trim((string) ($in['ssh_key'] ?? '')) !== '';
-        if (!$fresh && !$required && !empty($_SESSION['analyzer_ssh'])) {
+        $slot = self::connSlot();
+        $tested = $slot['ssh'] ?? ($_SESSION['analyzer_conns']['_']['ssh'] ?? null);
+        if (!$fresh && !$required && !empty($tested)) {
             // Credenciais já testadas: só atualiza a opção de sudo, que pode ter sido marcada depois do teste
-            $c = json_decode((string) Crypto::decrypt($_SESSION['analyzer_ssh']), true) ?: [];
+            $c = json_decode((string) Crypto::decrypt($tested), true) ?: [];
             $c['sudo'] = !empty($in['ssh_sudo']);
             $c['sudo_password'] = $c['sudo'] ? ((string) ($in['ssh_sudo_password'] ?? '') ?: ($c['sudo_password'] ?? '') ?: ($c['password'] ?? '')) : '';
-            return $_SESSION['analyzer_ssh'] = Crypto::encrypt(json_encode($c));
+            return self::setSsh(Crypto::encrypt(json_encode($c)));
         }
-        $conn = json_decode((string) Crypto::decrypt($_SESSION['analyzer_conn'] ?? null), true) ?: [];
+        $conn = json_decode((string) Crypto::decrypt($slot['conn'] ?? null), true) ?: [];
         $c = SshClient::fromInput($in, (string) ($conn['host'] ?? ''));
-        return $_SESSION['analyzer_ssh'] = Crypto::encrypt(json_encode($c));
+        return self::setSsh(Crypto::encrypt(json_encode($c)));
     }
 
     /** POST /api/analyzer/ssh — testa o SSH e detecta vCPU, RAM, clock e tipo de disco. */
@@ -107,7 +140,7 @@ final class AnalyzerController
                 'info' => array_filter(['kernel' => $p['kernel'] ?? null, 'cpu' => $p['cpu_model'] ?? null, 'virt' => $p['virtualization'] ?? null,
                     'ram' => isset($p['mem']['total']) ? human_bytes($p['mem']['total']) : null])]);
         } catch (\Throwable $e) {
-            unset($_SESSION['analyzer_ssh']);
+            self::setSsh(null);
             Audit::log('ssh.failed', 'Falha SSH: ' . $e->getMessage(), 'WARNING');
             Http::json(['ok' => false, 'error' => mb_substr($e->getMessage(), 0, 400)]);
         }
@@ -116,10 +149,10 @@ final class AnalyzerController
     /** POST /api/analyzer/start — coloca a análise na fila do servidor e devolve o id para acompanhar. */
     public function start(): void
     {
-        $conn = json_decode((string) Crypto::decrypt($_SESSION['analyzer_conn'] ?? null), true);
+        $conn = json_decode((string) Crypto::decrypt(self::connSlot()['conn'] ?? null), true);
         $db = Http::str('database');
         if (!$conn || $db === '') {
-            Http::json(['error' => 'Conecte e selecione um banco primeiro.'], 422);
+            Http::json(['error' => $conn ? 'Selecione um banco.' : 'Conexão expirada ou não encontrada: clique em "Conectar e Listar Bancos" de novo.'], 422);
             return;
         }
         $in = Http::input();
