@@ -2,6 +2,7 @@
 /** Aba "Segurança & Versão": CVEs conhecidos e ciclo de vida da versão do SGBD. @var array $v @var array $list */
 use App\Core\View;
 
+$v = $v ? \App\Analyzer\VulnCheck::localizeStored($v) : $v;
 $sevLabel = ['critical' => 'CRÍTICO', 'high' => 'ALTO', 'medium' => 'MÉDIO', 'low' => 'BAIXO', 'unknown' => 'N/D'];
 $life = $v['lifecycle'] ?? [];
 $statusTxt = [

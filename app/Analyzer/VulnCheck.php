@@ -161,7 +161,7 @@ final class VulnCheck
             }
             if ($hit) {
                 $out[] = ['id' => $c['id'], 'cvss' => $c['cvss'], 'sev' => $c['sev'] ?: self::sevFromScore($c['cvss']),
-                    'pub' => $c['pub'], 'summary' => $c['sum'], 'fixed_in' => $fixed, 'kev' => $c['kev'] ?? null];
+                    'pub' => $c['pub'], 'summary' => $c['pt'] ?? $c['sum'], 'summary_en' => $c['sum'], 'lang' => isset($c['pt']) ? 'pt' : 'en', 'fixed_in' => $fixed, 'kev' => $c['kev'] ?? null];
             }
         }
         usort($out, fn($a, $b) => [(int) !empty($b['kev']), $b['cvss'] ?? 0, $b['pub']] <=> [(int) !empty($a['kev']), $a['cvss'] ?? 0, $a['pub']]);
@@ -250,7 +250,7 @@ final class VulnCheck
      * Avalia a versão. Nunca lança exceção: sem base ou sem versão, devolve status explicando o motivo.
      * @return array{metrics: array, findings: array, log: array}
      */
-    public static function evaluate(string $engine, array $connect): array
+    public static function evaluate(string $engine, array $connect, ?callable $ai = null): array
     {
         $log = [];
         $findings = [];
@@ -299,7 +299,8 @@ final class VulnCheck
             $prefix = preg_replace('/[^\d.].*$/', '', $cycle['cycle']) . '.';
             $behind = count(array_filter($edb['versions'], fn($x) => str_starts_with($x, $prefix) && self::cmp($x, $v) > 0 && self::cmp($x, $latest) <= 0));
         }
-        $cves = $oracleNoRu ? [] : self::match($edb['cves'], $v);
+        $all = $oracleNoRu ? [] : self::match($edb['cves'], $v);
+        $cves = self::localize(array_slice($all, 0, 200), $ai, $log) + $all; // traduz só os que aparecem no laudo
 
         // Versão-alvo: a última do ciclo; sem ela (Oracle), a maior correção conhecida dentro do mesmo major
         $target = $latest && self::cmp($latest, $v) > 0 ? $latest : null;
@@ -388,7 +389,7 @@ final class VulnCheck
                 if (!$x || !$ev) {
                     continue;
                 }
-                $hits = self::match($x['cves'], $ev);
+                $hits = self::localize(self::match($x['cves'], $ev), $ai, $log);
                 $extOut[$name] = ['version' => $ev, 'cves' => $hits];
                 if ($hits) {
                     $fix = array_filter(array_column($hits, 'fixed_in'));
@@ -406,6 +407,74 @@ final class VulnCheck
         $m['extensions'] = $extOut;
 
         return ['metrics' => $m, 'findings' => $findings, 'log' => $log];
+    }
+
+    /**
+     * Descrições em português: regras da base > cache local > IA (se $ai for passado) > inglês.
+     * @param callable|null $ai fn(array<string,string> $idToEnglish): array<string,string> $idToPortuguese
+     */
+    public static function localize(array $list, ?callable $ai = null, ?array &$log = null): array
+    {
+        $missing = [];
+        foreach ($list as $c) {
+            if (($c['lang'] ?? 'en') !== 'pt') {
+                $missing[$c['id']] = $c['summary_en'] ?? $c['summary'];
+            }
+        }
+        if (!$missing) {
+            return $list;
+        }
+        $pt = CveTranslator::cached($missing);
+        $rest = array_diff_key($missing, $pt);
+        if ($rest && $ai) {
+            try {
+                $pt += $ai($rest);
+            } catch (\Throwable $e) {
+                $log[] = '⚠ Tradução dos CVEs pela IA indisponível: ' . mb_substr($e->getMessage(), 0, 120);
+            }
+        }
+        foreach ($list as &$c) {
+            if (isset($pt[$c['id']])) {
+                $c['summary_en'] ??= $c['summary'];
+                $c['summary'] = $pt[$c['id']];
+                $c['lang'] = 'pt';
+            }
+        }
+        unset($c);
+        return $list;
+    }
+
+    /** Para laudos já gravados: aplica traduções disponíveis offline (base + cache), sem chamar a IA. */
+    public static function localizeStored(array $v): array
+    {
+        if (empty($v['cves']) && empty($v['extensions'])) {
+            return $v;
+        }
+        $db = self::db();
+        $idx = [];
+        foreach ([$db['engines'][$v['engine_key'] ?? ''] ?? [], ...array_values($db['pg_extensions'] ?? [])] as $e) {
+            foreach ($e['cves'] ?? [] as $c) {
+                if (isset($c['pt'])) {
+                    $idx[$c['id']] = $c['pt'];
+                }
+            }
+        }
+        $fix = function (array $list) use ($idx): array {
+            foreach ($list as &$c) {
+                if (($c['lang'] ?? 'en') !== 'pt' && isset($idx[$c['id']])) {
+                    $c['summary_en'] ??= $c['summary'];
+                    $c['summary'] = $idx[$c['id']];
+                    $c['lang'] = 'pt';
+                }
+            }
+            unset($c);
+            return self::localize($list);
+        };
+        $v['cves'] = $fix($v['cves'] ?? []);
+        foreach ($v['extensions'] ?? [] as $k => $x) {
+            $v['extensions'][$k]['cves'] = $fix($x['cves'] ?? []);
+        }
+        return $v;
     }
 
     /** Resumo compacto para o prompt da IA e para exportações. */
@@ -434,6 +503,7 @@ final class VulnCheck
     /** Seção Markdown do laudo exportado. */
     public static function markdown(array $v): string
     {
+        $v = self::localizeStored($v);
         $s = self::summary($v);
         if (!$s) {
             return '';

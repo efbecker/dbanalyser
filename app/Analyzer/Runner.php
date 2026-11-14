@@ -488,7 +488,19 @@ final class Runner
         $a = $this->a;
         $metrics = json_decode((string) $a['metrics_json'], true) ?: [];
         try {
-            $out = VulnCheck::evaluate((string) $a['engine'], $metrics['connect'] ?? []);
+            // Descrições dos CVEs em português: o que não vem traduzido na base nem está em cache, a IA traduz (com cache)
+            $client = AiClient::forUser($this->user);
+            $ai = $client ? function (array $missing) use ($client, $a): array {
+                $this->emit(['k' => 'log', 't' => '→ Traduzindo ' . min(count($missing), 80) . " descrições de CVE para português com {$client->provider}…"]);
+                [$pt, $st] = CveTranslator::translate($missing, $client);
+                if ($st['calls']) {
+                    Database::insert('ai_usage', ['user_id' => $this->user['id'], 'analysis_id' => $a['id'], 'provider' => $client->provider, 'model' => $client->model,
+                        'tokens_in' => $st['tokens_in'], 'tokens_out' => $st['tokens_out'], 'latency_ms' => 0]);
+                }
+                $this->emit(['k' => 'log', 't' => $st['error'] ? '⚠ Tradução parcial dos CVEs: ' . $st['error'] : '✔ ' . count($pt) . ' descrições traduzidas (guardadas em cache)']);
+                return $pt;
+            } : null;
+            $out = VulnCheck::evaluate((string) $a['engine'], $metrics['connect'] ?? [], $ai);
         } catch (\Throwable $e) {
             $out = ['metrics' => ['status' => 'error', 'error' => $e->getMessage()], 'findings' => [], 'log' => ['⚠ Checagem de vulnerabilidades indisponível: ' . mb_substr($e->getMessage(), 0, 160)]];
         }

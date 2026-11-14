@@ -131,6 +131,10 @@ afetam a versão (com CVSS, versão que corrige e marcação de exploração ati
 - **Atualização:** o workflow `.github/workflows/vulndb.yml` regera a base toda segunda e faz commit na `main`; cada
   servidor baixa o arquivo novo com `php bin/console vulndb:update` (cron semanal instalado pelo `install.sh`).
   Para regerar à mão: `pip install pyyaml && python3 tools/build_vulndb.py`.
+- **Descrições em português:** textos padrão da Oracle (MySQL/Oracle Database) e da Microsoft são traduzidos por regras
+  na geração da base (`tools/cve_pt.py`, sem IA). O restante (PostgreSQL, MariaDB e textos livres) é traduzido pela IA
+  configurada durante a análise (até 80 por análise, só os que aparecem no laudo) e guardado em `<data_dir>/cve-pt.json`,
+  que sobrevive às atualizações da base. Sem IA, essas descrições ficam no original em inglês.
 - `php bin/console vulndb:status` mostra a data da base em uso; `vulndb:check postgresql 16.2` testa uma versão.
 - Motores: PostgreSQL, MySQL, MariaDB, SQL Server (build `15.0.4xxx`, linha GDR ou CU) e Oracle (RU, ex.: `19.21`;
   se o servidor informar só `19.0.0.0.0`, os CVEs não são verificados e o laudo avisa).

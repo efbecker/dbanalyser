@@ -16,6 +16,9 @@ import argparse, datetime as dt, json, lzma, os, re, sys, urllib.request
 
 import yaml
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cve_pt import translate as translate_pt  # noqa: E402
+
 FEED = 'https://github.com/fkie-cad/nvd-json-data-feeds/releases/latest/download/CVE-{y}.json.xz'
 EOL_MD = 'https://raw.githubusercontent.com/endoflife-date/endoflife.date/master/products/{p}.md'
 EOL_REL = 'https://raw.githubusercontent.com/endoflife-date/release-data/main/releases/{p}.json'
@@ -246,6 +249,9 @@ def main():
                     rs = dedupe([[r[0] if r[0] and r[0] != '0' else ('.'.join(r[2].split('.')[:2]) if r[2] else None), r[1], r[2], r[3]] for r in rs])
                 score, sev = cvss(cve)
                 item = {'id': cve['id'], 'cvss': score, 'sev': sev, 'pub': (cve.get('published') or '')[:10], 'sum': summary(cve), 'r': rs}
+                pt = translate_pt(next((d['value'] for d in cve.get('descriptions', []) if d.get('lang') == 'en'), ''))
+                if pt:
+                    item['pt'] = pt  # tradução por regras (texto padrão Oracle/Microsoft); o resto a IA traduz no servidor
                 if cve.get('cisaExploitAdd'):
                     item['kev'] = cve['cisaExploitAdd']
                 bucket[cve['id']] = item
