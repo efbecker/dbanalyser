@@ -52,11 +52,12 @@ sudo -u www-data php /var/www/db-analyzer/bin/console user:password admin
 │   ├── Controllers/             Auth, Dashboard, Analyzer, Report, Ai, User, Branding, Log
 │   ├── Analyzer/                Connector (read-only), Collector (contrato), PostgresCollector, MysqlCollector,
 │   │                            MssqlCollector, OracleCollector + OracleConnection (ponte python-oracledb),
-│   │                            Sizing (veredito + postgresql.conf/my.cnf), Scorer, Prompt, MarkdownReport
+│   │                            Sizing (veredito + postgresql.conf/my.cnf), Scorer, Prompt, MarkdownReport,
+│   │                            Runner (execução em segundo plano, fila e progresso)
 │   ├── Ai/AiClient.php          OpenAI, Anthropic, Gemini, Ollama, Groq, DeepSeek (só ext-curl)
 │   └── Views/                   templates PHP
 ├── database/migrations/*.sql    esquema SQLite versionado
-├── bin/console                  migrate, admin:init, user:create, user:password, key:generate, logs:prune
+├── bin/console                  migrate, admin:init, user:*, key:generate, logs:prune, worker, analysis:run, analysis:list
 └── deploy/apache/               VirtualHost com HTTPS, HSTS, CSP e bloqueio de tudo fora de /public
 
 /etc/db-analyzer/config.php      config + app_key (root:www-data 0640)
@@ -66,8 +67,14 @@ sudo -u www-data php /var/www/db-analyzer/bin/console user:password admin
 ## Como a análise funciona
 
 1. **Conectar e listar bancos**: valida credenciais com sessão `READ ONLY` + `statement_timeout`/`max_execution_time`.
-2. A análise roda em 9 etapas (`/api/analyzer/step`), cada uma devolvendo log, contadores e grafo para a animação:
+2. A análise roda **no servidor, em segundo plano**, em 9 etapas:
    Conectando → Mapeando Schemas → Analisando Índices → Avaliando Queries → Hardware/Buffers → SO via SSH (opcional) → Vulnerabilidades → Consultando IA → Laudo.
+   O serviço `db-analyzer-worker` (systemd) lança um processo `bin/console analysis:run ID` por análise (até 3 simultâneas,
+   `worker_concurrency` no config) e cada etapa grava log, contadores e grafo em `analyses.progress_json`. A tela do analisador
+   só reproduz esses eventos (`/api/analyzer/progress`): dá para fechar a página e voltar depois, a animação retoma do ponto atual.
+   Relatórios, Painel e a barra lateral mostram as análises em andamento com o percentual ao vivo; **Cancelar** interrompe
+   inclusive a chamada à IA. Se o processo morrer (reboot, OOM), o worker retoma a análise da etapa em que parou.
+   Sem o serviço, a própria requisição web dispara o processo. `bin/console analysis:list` mostra o que está rodando.
 3. Regras determinísticas geram achados com severidade e **SQL de correção**; o `Sizing` calcula a configuração de
    referência para o hardware informado e um veredito (subdimensionado / superdimensionado / mal tunado / adequado).
 4. A IA recebe a coleta compactada e devolve o laudo em Markdown. Sem IA configurada, o laudo é só heurístico.
@@ -102,7 +109,8 @@ OOM no `dmesg`/`journalctl -k`, `df` do diretório de dados e das montagens, `ls
   `oraculo ALL=(root) NOPASSWD: /usr/bin/journalctl -k -q --no-pager -n 1, /usr/bin/journalctl -k -q --no-pager --since=-30d, /usr/bin/dmesg -T`
 - Em VMs (virtio `vd*`, discos QEMU/VMware/Hyper-V) o kernel não conhece a mídia física e costuma marcar o disco como
   rotacional. Nesses casos o analisador não afirma HDD/SSD: mantém o tipo escolhido no formulário e registra a ressalva no laudo.
-- Credenciais SSH ficam só na sessão, cifradas com libsodium como as do banco, e nunca são gravadas no SQLite.
+- Credenciais SSH (e as do banco) ficam cifradas com libsodium em `analyses.secrets_enc` só enquanto a análise roda no
+  worker, e são apagadas ao concluir, falhar ou cancelar.
   A chave privada vai para um arquivo temporário 0600 apagado logo após a conexão; a senha passa ao `sshpass` por variável de ambiente.
 - A chave do host é fixada na primeira conexão (`<data_dir>/ssh/known_hosts`). Se mudar, a coleta é recusada; após uma
   reinstalação legítima rode `sudo -u www-data php bin/console ssh:forget <host>`.
@@ -143,6 +151,7 @@ Para adicionar um motor novo, implemente `App\Analyzer\Collector` e registre em 
 php -r "echo \"<?php return ['debug'=>true,'app_key'=>'\".base64_encode(random_bytes(32)).\"'];\";" > storage/config.php
 php bin/console migrate && php bin/console admin:init --password=troque-esta-senha
 php -S 127.0.0.1:8080 -t public bin/dev-router.php
+php bin/console worker   # opcional: sem ele a requisição web dispara cada análise
 ```
 
 ## Fluxo de versionamento

@@ -3,6 +3,14 @@
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
 $active = fn(string $p) => ($p === '/' ? $path === url('/') : str_starts_with((string) $path, url($p))) ? 'active' : '';
 $isAdmin = ($user['role'] ?? '') === 'ADMIN';
+$liveRuns = [];
+if ($user) {
+    try {
+        $liveRuns = App\Core\Database::all("SELECT * FROM analyses WHERE status = 'running'" . ($isAdmin ? '' : ' AND user_id = ' . (int) $user['id']) . ' ORDER BY id DESC LIMIT 20');
+    } catch (\Throwable) {
+    }
+}
+$live0 = $liveRuns ? App\Analyzer\Runner::summary($liveRuns[0]) : null;
 ?><!doctype html>
 <html lang="pt-BR">
 <head>
@@ -38,6 +46,11 @@ $isAdmin = ($user['role'] ?? '') === 'ADMIN';
       <a href="<?= e(url('/admin/logs')) ?>" class="<?= $active('/admin/logs') ?>"><span>📜</span> Logs</a>
       <?php endif; ?>
     </nav>
+    <a class="nav-live" id="nav-live" href="<?= e(url($live0 && count($liveRuns) === 1 ? '/analyzer?watch=' . $live0['id'] : '/reports')) ?>" data-base="<?= e(url('')) ?>"<?= $live0 ? '' : ' hidden' ?>>
+      <span class="nav-live-top"><span class="nav-live-dot"></span><span id="nav-live-count"><?= count($liveRuns) === 1 ? '1 análise em andamento' : count($liveRuns) . ' análises em andamento' ?></span><b id="nav-live-pct"><?= (int) ($live0['percent'] ?? 0) ?>%</b></span>
+      <span class="nav-live-sub" id="nav-live-sub"><?= $live0 ? e('#' . $live0['id'] . ' · ' . $live0['database'] . ' · ' . $live0['stage_label']) : '' ?></span>
+      <span class="live-track"><i id="nav-live-fill" style="width:<?= (int) ($live0['percent'] ?? 0) ?>%"></i></span>
+    </a>
     <div class="sidebar-foot">
       <div class="who"><?= e($user['display_name'] ?: $user['username']) ?></div>
       <a href="<?= e(url('/account/password')) ?>" class="muted small">Alterar senha</a>

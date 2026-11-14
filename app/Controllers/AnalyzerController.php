@@ -4,30 +4,31 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Ai\AiClient;
-use App\Analyzer\{Connector, OsCollector, Prompt, Scorer, Sizing, SshClient, VulnCheck};
+use App\Analyzer\{Connector, OsCollector, Runner, SshClient};
 use App\Core\{Audit, Auth, Crypto, Database, Http, View};
 
 final class AnalyzerController
 {
-    public const STAGES = [
-        'connect' => 'Conectando',
-        'schemas' => 'Mapeando Schemas',
-        'indexes' => 'Analisando Índices',
-        'queries' => 'Avaliando Queries',
-        'sizing'  => 'Checando Hardware/Buffers',
-        'os'      => 'Coletando SO via SSH',
-        'vulns'   => 'Checando Vulnerabilidades',
-        'ai'      => 'Consultando IA',
-        'report'  => 'Gerando Laudo Técnico',
-    ];
+    public const STAGES = Runner::STAGES;
 
     public function index(): void
     {
         $u = Auth::user();
         $infra = json_decode((string) ($u['infra_json'] ?? ''), true) ?: [];
+        // Volta para uma análise em andamento: ?watch=ID ou a mais recente do usuário
+        $watch = null;
+        if (isset($_GET['watch'])) {
+            $watch = self::visible((int) $_GET['watch']);
+            if ($watch && $watch['status'] === 'done') {
+                Http::redirect('/reports/' . $watch['id']);
+                return;
+            }
+        } else {
+            $watch = Database::one("SELECT * FROM analyses WHERE user_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1", [$u['id']]);
+        }
         View::render('analyzer/index', [
             'title' => 'Analisador', 'engines' => Connector::ENGINES, 'stages' => self::STAGES, 'infra' => $infra,
-            'ai' => AiClient::forUser($u),
+            'ai' => AiClient::forUser($u), 'watch' => $watch,
         ]);
     }
 
@@ -112,7 +113,7 @@ final class AnalyzerController
         }
     }
 
-    /** POST /api/analyzer/start — cria a análise. */
+    /** POST /api/analyzer/start — coloca a análise na fila do servidor e devolve o id para acompanhar. */
     public function start(): void
     {
         $conn = json_decode((string) Crypto::decrypt($_SESSION['analyzer_conn'] ?? null), true);
@@ -130,281 +131,101 @@ final class AnalyzerController
             'dedicated' => !empty($in['dedicated']),
         ], fn($v) => $v !== null);
         try {
-            $ssh = $this->sshInput(false);
+            $sshEnc = $this->sshInput(false);
         } catch (\InvalidArgumentException $e) {
             Http::json(['error' => 'SSH: ' . $e->getMessage()], 422);
             return;
         }
-        $id = Database::insert('analyses', [
-            'user_id' => Auth::user()['id'], 'engine' => $conn['engine'], 'host' => $conn['host'], 'port' => $conn['port'],
-            'database_name' => $db, 'hardware_json' => json_encode($hw), 'metrics_json' => '{}', 'findings_json' => '[]',
-        ]);
-        $_SESSION['analyses'][$id] = ['conn' => $_SESSION['analyzer_conn'], 'db' => $db, 'ssh' => $ssh];
-        Audit::log('analysis.started', "Análise #$id de {$conn['host']}/$db");
+        $ssh = $sshEnc ? json_decode((string) Crypto::decrypt($sshEnc), true) : null;
+        $id = Runner::enqueue(Auth::user(), $conn, $db, $hw, $ssh);
+        Audit::log('analysis.started', "Análise #$id de {$conn['host']}/$db (segundo plano)");
+        Runner::dispatch($id);
         Http::json(['id' => $id, 'stages' => self::STAGES]);
     }
 
-    /** POST /api/analyzer/step — executa uma etapa e devolve telemetria. */
-    public function step(): void
+    /** Análise visível para o usuário (dono ou admin). */
+    private static function visible(int $id): ?array
     {
-        $id = (int) Http::str('id');
-        $stage = Http::str('stage');
         $a = Database::one('SELECT * FROM analyses WHERE id = ?', [$id]);
-        if (!$a || ((int) $a['user_id'] !== (int) Auth::user()['id']) || !isset(self::STAGES[$stage]) || $a['status'] !== 'running') {
-            Http::json(['error' => 'Análise inválida ou já finalizada.'], 404);
+        return $a && (Auth::isAdmin() || (int) $a['user_id'] === (int) Auth::user()['id']) ? $a : null;
+    }
+
+    /** Se o runner morreu (ou nunca subiu, sem o serviço worker), relança. O claim atômico evita runners duplicados. */
+    private static function heal(array $a): void
+    {
+        if ($a['status'] !== 'running' || Runner::workerAlive()) {
             return;
         }
-        $t0 = microtime(true);
-        try {
-            $res = match ($stage) {
-                'vulns' => $this->stageVulns($a),
-                'ai' => $this->stageAi($a),
-                'report' => $this->stageReport($a),
-                'os' => $this->stageOs($a),
-                default => $this->stageCollect($a, $stage),
-            };
-            $res['elapsed_ms'] = (int) ((microtime(true) - $t0) * 1000);
-            Http::json($res);
-        } catch (\Throwable $e) {
-            Database::update('analyses', ['status' => 'failed', 'error' => "[$stage] " . $e->getMessage(), 'finished_at' => gmdate('Y-m-d H:i:s')], 'id = :id', ['id' => $id]);
-            Audit::log('analysis.error', "Análise #$id falhou em '$stage': " . $e->getMessage(), 'ERROR');
-            unset($_SESSION['analyses'][$id]);
-            Http::json(['error' => self::friendly($e), 'stage' => $stage], 500);
+        $orphan = empty($a['worker_pid']) && strtotime($a['started_at'] . ' UTC') < time() - 5;
+        if ($orphan || Runner::isStale($a)) {
+            Runner::spawn((int) $a['id']);
         }
     }
 
-    private function stageCollect(array $a, string $stage): array
+    /** GET /api/analyzer/progress?id=N&since=SEQ — eventos novos da análise para a animação. */
+    public function progress(): void
     {
-        $ctx = $_SESSION['analyses'][$a['id']] ?? null;
-        $conn = $ctx ? json_decode((string) Crypto::decrypt($ctx['conn']), true) : null;
-        if (!$conn) {
-            throw new \RuntimeException('Sessão de conexão expirada. Reconecte.');
+        $a = self::visible((int) ($_GET['id'] ?? 0));
+        if (!$a) {
+            Http::json(['error' => 'Análise não encontrada.'], 404);
+            return;
         }
-        $pdo = Connector::connect($conn, $a['database_name']);
-        $collector = Connector::collector($pdo, $a['engine'], $a['database_name']);
-        $out = $collector->{$stage}();
-
-        $metrics = json_decode((string) $a['metrics_json'], true) ?: [];
-        $metrics[$stage] = $out['metrics'];
-        $findings = array_values(array_filter(json_decode((string) $a['findings_json'], true) ?: [], fn($f) => ($f['stage'] ?? '') !== $stage));
-        foreach ($out['findings'] as $f) {
-            $findings[] = $f + ['stage' => $stage];
+        self::heal($a);
+        $since = max(0, (int) ($_GET['since'] ?? 0));
+        $p = Runner::progress($a);
+        $events = array_values(array_filter($p['events'], fn($e) => $e['s'] > $since));
+        $stages = [];
+        foreach ($p['stages'] as $k => $st) {
+            $stages[$k] = ['state' => $st['state'], 'ms' => $st['ms'] ?? null,
+                'elapsed' => isset($st['t0']) ? (int) ((microtime(true) - (float) $st['t0']) * 1000) : null];
         }
-        $upd = ['metrics_json' => json_encode($metrics, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE), 'findings_json' => json_encode($findings, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)];
-        if ($stage === 'connect') {
-            $upd['server_version'] = mb_substr((string) $out['metrics']['version'], 0, 200);
-        }
-        Database::update('analyses', $upd, 'id = :id', ['id' => $a['id']]);
-
-        $resp = ['log' => $out['log'], 'counters' => $out['counters'], 'findings' => count($out['findings']),
-            'severities' => array_count_values(array_column($out['findings'], 'severity'))];
-        if ($stage === 'schemas') {
-            // Grafo para a animação de varredura (limitado para manter fluidez)
-            $tables = array_slice($out['metrics']['tables'], 0, 60);
-            $names = array_flip(array_map(fn($t) => $t['schema'] . '.' . $t['name'], $tables));
-            $resp['graph'] = [
-                'nodes' => array_map(fn($t) => ['id' => $t['schema'] . '.' . $t['name'], 'label' => $t['name'], 'size' => $t['data_bytes'] + $t['index_bytes'], 'pk' => $t['has_pk']], $tables),
-                'edges' => array_values(array_filter(array_map(function ($f) use ($a) {
-                    $src = ($f['schema'] ?? $a['database_name']) . '.' . $f['table_name'];
-                    $dst = ($f['ref_schema'] ?? $a['database_name']) . '.' . $f['ref_table'];
-                    return ['from' => $src, 'to' => $dst];
-                }, $out['metrics']['foreign_keys']), fn($e) => isset($names[$e['from']], $names[$e['to']]))),
-            ];
-        }
-        return $resp;
+        $needGraph = $since === 0 || array_filter($events, fn($e) => $e['k'] === 'graph');
+        Http::json(Runner::summary($a) + [
+            'seq' => $p['seq'], 'first_seq' => $p['events'][0]['s'] ?? 0, 'events' => $events, 'stages' => $stages, 'counters' => $p['counters'],
+            'graph' => $needGraph ? $p['graph'] : null, 'url' => $a['status'] === 'done' ? url('/reports/' . $a['id']) : null,
+            'error' => $a['status'] === 'failed' ? $a['error'] : null, 'stage_labels' => self::STAGES,
+        ]);
     }
 
-    /**
-     * Coleta do SO via SSH (opcional). Falhas aqui não derrubam a análise: o laudo segue sem os dados do SO.
-     * Também preenche/corrige o hardware com o que foi detectado no servidor.
-     */
-    private function stageOs(array $a): array
+    /** GET /api/analyzer/running — análises em andamento (próprias; admin vê todas) para a barra lateral e listas. */
+    public function running(): void
     {
-        $ctx = $_SESSION['analyses'][$a['id']] ?? null;
-        $sshC = $ctx && !empty($ctx['ssh']) ? json_decode((string) Crypto::decrypt($ctx['ssh']), true) : null;
-        if (!$sshC) {
-            return ['log' => ['• Coleta via SSH não habilitada — etapa ignorada (o laudo vai listar os comandos de SO a rodar manualmente).'], 'counters' => [], 'findings' => 0];
+        $scope = Auth::isAdmin() ? '' : ' AND user_id = ' . (int) Auth::user()['id'];
+        $rows = Database::all("SELECT * FROM analyses WHERE status = 'running'$scope ORDER BY id DESC LIMIT 20");
+        foreach ($rows as $a) {
+            self::heal($a);
         }
-        $ssh = new SshClient($sshC);
-        $log = ['→ ssh ' . $ssh->label() . ' (somente leitura, ' . count(OsCollector::COMMANDS) . ' comandos fixos, ' . ($ssh->sudo() ? 'sudo só para ler o log do kernel' : 'sem sudo') . ')'];
-        $metrics = json_decode((string) $a['metrics_json'], true) ?: [];
-        $dataDir = $this->dataDirectory($a, $ctx);
-        try {
-            $r = (new OsCollector($ssh))->collect($dataDir);
-        } catch (\Throwable $e) {
-            Audit::log('ssh.collect_failed', "Análise #{$a['id']}: " . $e->getMessage(), 'WARNING');
-            $metrics['os'] = ['error' => mb_substr($e->getMessage(), 0, 400), 'target' => $ssh->label()];
-            Database::update('analyses', ['metrics_json' => json_encode($metrics, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)], 'id = :id', ['id' => $a['id']]);
-            return ['log' => array_merge($log, ['⚠ Coleta SSH falhou: ' . mb_substr($e->getMessage(), 0, 300), '• Seguindo sem dados do SO.']), 'counters' => [], 'findings' => 0];
-        }
-        $p = $r['parsed'];
-        $log[] = "✔ Coleta recebida em {$r['ms']} ms" . ($r['fingerprint'] ? " · host key {$r['fingerprint']}" : '');
-        foreach ($r['raw'] as $k => $x) {
-            if ($x['rc'] !== 0 && !in_array($k, ['oom'], true)) {
-                $log[] = '⚠ ' . (OsCollector::COMMANDS[$k][0] ?? $k) . ' indisponível: ' . mb_substr(strtok($x['out'], "\n") ?: "código {$x['rc']}", 0, 120);
+        // Ids pedidos que já terminaram: a interface troca a linha "em andamento" pelo resultado
+        $ids = array_slice(array_filter(array_map('intval', explode(',', (string) ($_GET['ids'] ?? '')))), 0, 50);
+        $finished = [];
+        if ($ids) {
+            $in = implode(',', $ids);
+            foreach (Database::all("SELECT id, status, score, error FROM analyses WHERE id IN ($in) AND status <> 'running'$scope") as $f) {
+                $finished[] = ['id' => (int) $f['id'], 'status' => $f['status'], 'score' => $f['score'] !== null ? (int) $f['score'] : null, 'error' => $f['error'], 'url' => url('/reports/' . $f['id'])];
             }
         }
-        if (isset($p['mem']['total'])) {
-            $log[] = sprintf('  ↳ RAM %s · disponível %s · swap %s/%s', human_bytes($p['mem']['total']), human_bytes($p['mem']['available']), human_bytes($p['mem']['swap_used']), human_bytes($p['mem']['swap_total']));
-        }
-        if (isset($p['load'])) {
-            $log[] = "  ↳ {$p['vcpu']} vCPU · load {$p['load']['1m']} / {$p['load']['5m']} / {$p['load']['15m']}";
-        }
-        if (isset($p['vmstat'])) {
-            $v = $p['vmstat'];
-            $log[] = "  ↳ vmstat: us {$v['us']}% sy {$v['sy']}% wa {$v['wa']}% · si/so {$v['si']}/{$v['so']}";
-        }
-        if (isset($p['data_dir']['used_pct'])) {
-            $log[] = "  ↳ dados em {$p['data_dir']['path']}: {$p['data_dir']['used_pct']}% usado, " . human_bytes($p['data_dir']['avail']) . ' livres';
-        }
-        $log[] = $p['oom_access'] ?? true ? '  ↳ eventos de OOM no kernel: ' . count($p['oom_events'] ?? []) . (!empty($p['oom_via_sudo']) ? ' (lido via sudo)' : '')
-            : '⚠ sem permissão para ler o log do kernel (OOM não verificado)' . (($p['sudo'] ?? null) === 'negado' ? ': sudo recusado' : '');
-        if (!empty($r['hardware']['disk_note'])) {
-            $log[] = '• ' . $r['hardware']['disk_note'] . ': mantido o tipo de disco informado no formulário';
-        }
-
-        // Hardware: o detectado no servidor prevalece sobre o digitado
-        $hw = json_decode((string) $a['hardware_json'], true) ?: [];
-        $det = $r['hardware'];
-        foreach ($det as $k => $v) {
-            if (isset($hw[$k]) && $hw[$k] != $v) {
-                $log[] = "• $k informado ({$hw[$k]}) difere do detectado ($v): usando o detectado";
-            }
-        }
-        $hw = ['source' => 'ssh'] + array_replace($hw, $det);
-
-        $findings = Scorer::sort(OsCollector::findings($p, $a['engine'], $metrics['sizing']['settings'] ?? []));
-        $metrics['os'] = ['target' => $ssh->label(), 'fingerprint' => $r['fingerprint'], 'collected_ms' => $r['ms'], 'parsed' => $p, 'raw' => $r['raw']];
-        $all = array_values(array_filter(json_decode((string) $a['findings_json'], true) ?: [], fn($f) => ($f['stage'] ?? '') !== 'os'));
-        foreach ($findings as $f) {
-            $all[] = $f + ['stage' => 'os'];
-        }
-        Database::update('analyses', [
-            'hardware_json' => json_encode($hw),
-            'metrics_json' => json_encode($metrics, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
-            'findings_json' => json_encode($all, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
-        ], 'id = :id', ['id' => $a['id']]);
-        Audit::log('ssh.collect', "Análise #{$a['id']}: SO coletado via SSH em " . $ssh->label());
-        foreach (array_slice($findings, 0, 8) as $f) {
-            $log[] = '⚠ [' . strtoupper($f['severity']) . '] ' . $f['title'];
-        }
-        return ['log' => $log, 'counters' => [], 'findings' => count($findings), 'severities' => array_count_values(array_column($findings, 'severity')), 'hardware' => $det];
+        Http::json(['items' => array_map([Runner::class, 'summary'], $rows), 'finished' => $finished]);
     }
 
-    /** Diretório de dados do SGBD (para medir o disco certo). Sem privilégio para ler, cai nos caminhos padrão. */
-    private function dataDirectory(array $a, array $ctx): ?string
+    /** POST /api/analyzer/cancel — pede o cancelamento; o runner para antes da próxima etapa. */
+    public function cancel(): void
     {
-        try {
-            $conn = json_decode((string) Crypto::decrypt($ctx['conn']), true);
-            $pdo = Connector::connect($conn, $a['database_name']);
-            $dir = match ($a['engine']) {
-                'postgresql' => $pdo->query("SELECT setting FROM pg_settings WHERE name = 'data_directory'")->fetchColumn(),
-                'mysql', 'mariadb' => $pdo->query('SELECT @@datadir')->fetchColumn(),
-                'sqlserver' => $pdo->query("SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(260)) AS d")->fetchColumn(),
-                'oracle' => ($pdo->query("SELECT SUBSTR(file_name, 1, INSTR(file_name, '/', -1) - 1) AS d FROM dba_data_files WHERE ROWNUM = 1")->fetchAll()[0]['d'] ?? null),
-                default => null,
-            };
-            if ($dir) {
-                return (string) $dir;
-            }
-        } catch (\Throwable) {
+        $a = self::visible((int) Http::str('id'));
+        if (!$a || $a['status'] !== 'running') {
+            Http::json(['error' => 'Análise não está em andamento.'], 404);
+            return;
         }
-        return match ($a['engine']) {
-            'postgresql' => '/var/lib/postgresql',
-            'mysql', 'mariadb' => '/var/lib/mysql',
-            'sqlserver' => '/var/opt/mssql',
-            'oracle' => '/opt/oracle/oradata',
-            default => null,
-        };
-    }
-
-    /** CVEs e ciclo de vida da versão coletada. Usa só a base local: não depende de internet e nunca derruba a análise. */
-    private function stageVulns(array $a): array
-    {
-        $metrics = json_decode((string) $a['metrics_json'], true) ?: [];
-        try {
-            $out = VulnCheck::evaluate((string) $a['engine'], $metrics['connect'] ?? []);
-        } catch (\Throwable $e) {
-            $out = ['metrics' => ['status' => 'error', 'error' => $e->getMessage()], 'findings' => [], 'log' => ['⚠ Checagem de vulnerabilidades indisponível: ' . mb_substr($e->getMessage(), 0, 160)]];
+        Database::exec("UPDATE analyses SET cancel_requested = 1 WHERE id = ? AND status = 'running'", [$a['id']]);
+        // Sem runner vivo (fila ou órfã), encerra aqui mesmo
+        if (empty($a['worker_pid']) || Runner::isStale($a)) {
+            Database::exec("UPDATE analyses SET status = 'failed', error = 'Cancelada pelo usuário', finished_at = datetime('now'), secrets_enc = NULL, worker_pid = NULL WHERE id = ? AND status = 'running'", [$a['id']]);
         }
-        $metrics['vulns'] = $out['metrics'];
-        $findings = array_values(array_filter(json_decode((string) $a['findings_json'], true) ?: [], fn($f) => ($f['stage'] ?? '') !== 'vulns'));
-        foreach ($out['findings'] as $f) {
-            $findings[] = $f + ['stage' => 'vulns'];
-        }
-        Database::update('analyses', [
-            'metrics_json' => json_encode($metrics, JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
-            'findings_json' => json_encode($findings, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
-        ], 'id = :id', ['id' => $a['id']]);
-        return ['log' => $out['log'], 'counters' => ['cves' => (int) ($out['metrics']['cve_total'] ?? 0)], 'findings' => count($out['findings']),
-            'severities' => array_count_values(array_column($out['findings'], 'severity'))];
-    }
-
-    private function stageAi(array $a): array
-    {
-        $metrics = json_decode((string) $a['metrics_json'], true) ?: [];
-        $findings = Scorer::sort(json_decode((string) $a['findings_json'], true) ?: []);
-        $hw = json_decode((string) $a['hardware_json'], true) ?: [];
-        $flavor = $a['engine'] === 'postgresql' ? 'postgresql' : ($metrics['connect']['flavor'] ?? $a['engine']);
-        $tuning = Sizing::evaluate($flavor, $metrics['sizing']['settings'] ?? [], $metrics['sizing']['stats'] ?? [], $hw, (int) ($metrics['connect']['db_size'] ?? 0), $metrics['connect']['extensions'] ?? [], $metrics['os']['parsed'] ?? []);
-        $score = Scorer::score($findings, $tuning);
-        $upd = ['tuning_json' => json_encode($tuning, JSON_UNESCAPED_UNICODE), 'score' => $score, 'findings_json' => json_encode($findings, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)];
-        $log = ['• Veredito heurístico: ' . mb_strtoupper($tuning['verdict']), '• Score técnico calculado: ' . $score . '/100'];
-
-        $user = Auth::user();
-        $client = AiClient::forUser($user);
-        $tokens = ['in' => 0, 'out' => 0];
-        if (!$client) {
-            $log[] = '⚠ Nenhuma IA configurada — laudo gerado apenas com regras determinísticas. Configure em /admin/ai.';
-        } else {
-            $log[] = "→ Enviando coleta para {$client->provider} / {$client->model}…";
-            try {
-                $a['hardware_json'] = json_encode($hw);
-                $r = $client->chat(Prompt::system(), Prompt::user($a, $metrics, $findings, $tuning));
-                $upd += ['ai_report_md' => $r['text'], 'ai_provider' => $client->provider, 'ai_model' => $client->model];
-                $tokens = ['in' => $r['tokens_in'], 'out' => $r['tokens_out']];
-                Database::insert('ai_usage', ['user_id' => $user['id'], 'analysis_id' => $a['id'], 'provider' => $client->provider, 'model' => $client->model,
-                    'tokens_in' => $r['tokens_in'], 'tokens_out' => $r['tokens_out'], 'latency_ms' => $r['latency_ms']]);
-                Audit::log('ai.usage', "Análise #{$a['id']}: {$r['tokens_in']} tokens entrada / {$r['tokens_out']} saída", 'INFO', ['provider' => $client->provider, 'model' => $client->model]);
-                $log[] = "✔ Laudo da IA recebido em {$r['latency_ms']} ms ({$r['tokens_in']}+{$r['tokens_out']} tokens)";
-            } catch (\Throwable $e) {
-                Audit::log('ai.error', "Falha na IA (análise #{$a['id']}): " . $e->getMessage(), 'ERROR');
-                $log[] = '✘ IA indisponível: ' . mb_substr($e->getMessage(), 0, 200) . ' — seguindo com laudo heurístico.';
-            }
-        }
-        Database::update('analyses', $upd, 'id = :id', ['id' => $a['id']]);
-        return ['log' => $log, 'counters' => ['score' => $score, 'tokens' => $tokens['in'] + $tokens['out']], 'verdict' => $tuning['verdict']];
-    }
-
-    private function stageReport(array $a): array
-    {
-        Database::update('analyses', ['status' => 'done', 'finished_at' => gmdate('Y-m-d H:i:s')], 'id = :id', ['id' => $a['id']]);
-        unset($_SESSION['analyses'][$a['id']]);
-        Audit::log('analysis.done', "Análise #{$a['id']} concluída (score {$a['score']})");
-        return ['log' => ['✔ Laudo técnico #' . $a['id'] . ' gerado'], 'counters' => ['score' => (int) $a['score']], 'url' => url('/reports/' . $a['id'])];
+        Audit::log('analysis.cancel', "Cancelamento da análise #{$a['id']} solicitado");
+        Http::json(['ok' => true]);
     }
 
     private static function friendly(\Throwable $e): string
     {
-        $m = $e->getMessage();
-        return match (true) {
-            str_contains($m, 'pg_hba.conf') => 'O pg_hba.conf do servidor não libera este usuário/IP no banco tentado (o analisador já tenta o banco informado, postgres, o banco com o nome do usuário e template1). '
-                . 'Informe em "Banco inicial" um banco liberado para o usuário (ex.: zabbix) ou adicione uma linha no pg_hba.conf para o IP deste servidor.',
-            str_contains($m, 'password authentication failed'), str_contains($m, 'autenticação do tipo senha falhou'), str_contains($m, 'Access denied') => 'Usuário ou senha recusados pelo servidor de banco.',
-            str_contains($m, 'Connection refused') => 'Conexão recusada: verifique host, porta e firewall.',
-            str_contains($m, 'timeout'), str_contains($m, 'timed out') => 'Tempo de conexão esgotado: host inacessível ou firewall bloqueando.',
-            str_contains($m, 'could not translate host'), str_contains($m, 'getaddrinfo') => 'Não foi possível resolver o nome do host.',
-            str_contains($m, 'could not find driver (pdo_dblib)') => 'Driver do SQL Server ausente: instale php8.4-sybase (FreeTDS) e reinicie o php-fpm, ou rode o install.sh de novo.',
-            str_contains($m, 'python-oracledb não instalado'), str_contains($m, 'driver Oracle') => 'Driver do Oracle ausente: rode o install.sh de novo (instala python3-oracledb, modo thin, sem Instant Client).',
-            str_contains($m, 'could not find driver') => 'Driver PDO ausente no servidor (php-pgsql/php-mysql/php-sybase).',
-            str_contains($m, 'Login failed'), str_contains($m, 'ORA-01017') => 'Usuário ou senha recusados pelo servidor de banco.',
-            str_contains($m, 'ORA-01045') => 'O usuário não tem CREATE SESSION no Oracle.',
-            str_contains($m, 'ORA-28000') => 'Conta bloqueada no Oracle (ORA-28000).',
-            str_contains($m, 'Nenhum service name padrão') => $m,
-            str_contains($m, 'ORA-12514'), str_contains($m, 'DPY-6001') => 'Service name não registrado no listener: informe o service name correto (ex.: ORCLPDB1) em "Banco inicial".',
-            str_contains($m, 'DPY-6005'), str_contains($m, 'ORA-12541') => 'Nenhum listener Oracle respondeu: verifique host, porta (1521) e firewall.',
-            str_contains($m, 'Unable to connect'), str_contains($m, 'Adaptive Server is unavailable') => 'Não foi possível conectar ao SQL Server: verifique host, porta (1433), firewall e se o TCP/IP está habilitado.',
-            default => mb_substr($m, 0, 300),
-        };
+        return Runner::friendly($e);
     }
 }

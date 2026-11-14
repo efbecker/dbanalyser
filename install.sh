@@ -237,6 +237,44 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+step "Worker de análises em segundo plano (systemd)"
+# As análises rodam fora do PHP-FPM: o navegador só acompanha o progresso gravado no SQLite.
+# KillMode=process: reiniciar/atualizar o worker não derruba análises já em execução (cada uma é um processo próprio).
+cat > /etc/systemd/system/db-analyzer-worker.service <<UNIT
+[Unit]
+Description=DB Oráculo Analyzer - worker de análises em segundo plano
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/php $APP_DIR/bin/console worker
+Restart=always
+RestartSec=3
+KillMode=process
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=$DATA_DIR
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --quiet db-analyzer-worker
+systemctl restart db-analyzer-worker
+sleep 2
+if systemctl is-active --quiet db-analyzer-worker; then
+  ok "db-analyzer-worker ativo (até 3 análises simultâneas; acompanhe com: sudo -u www-data php $APP_DIR/bin/console analysis:list)"
+else
+  warn "db-analyzer-worker não subiu (journalctl -u db-analyzer-worker). As análises ainda rodam, disparadas direto pela web."
+fi
+
+# -----------------------------------------------------------------------------
 echo -e "\n${G}════════════════════════════════════════════════════════════${N}"
 echo -e "${G} DB Oráculo Analyzer instalado — $(git -C "$APP_DIR" log -1 --format='%h %s')${N}"
 echo -e "${G}════════════════════════════════════════════════════════════${N}"

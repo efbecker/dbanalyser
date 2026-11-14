@@ -35,7 +35,7 @@
       <label class="check"><input type="checkbox" name="ssh_enabled" value="1" id="ssh-enabled"> Coletar memória, swap, CPU, disco e OOM do sistema operacional</label>
       <div id="ssh-fields" hidden>
         <p class="small muted">Somente leitura: o analisador roda apenas uma lista fixa de comandos de consulta (free, vmstat, /proc/meminfo, sysctl vm.*, dmesg, df…), sem sudo.
-          Use um usuário comum; para ver eventos de OOM ele precisa estar no grupo <code>adm</code> ou usar a opção de sudo abaixo. As credenciais ficam só na sua sessão, cifradas, e não são gravadas.</p>
+          Use um usuário comum; para ver eventos de OOM ele precisa estar no grupo <code>adm</code> ou usar a opção de sudo abaixo. As credenciais ficam cifradas apenas enquanto a análise roda no servidor e são apagadas ao terminar.</p>
         <div class="row">
           <label class="grow">Host SSH<input name="ssh_host" placeholder="mesmo host do banco"></label>
           <label class="w-port">Porta<input name="ssh_port" type="number" min="1" max="65535" value="22"></label>
@@ -72,8 +72,17 @@
 
   <section class="card scan-stage">
     <div class="scan-canvas-wrap">
-      <canvas id="scan-canvas"></canvas>
+      <canvas id="scan-canvas"<?php if ($watch): ?> data-watch="<?= (int) $watch['id'] ?>" data-engine="<?= e($watch['engine']) ?>"<?php endif; ?>></canvas>
       <div class="scan-overlay" id="scan-overlay">Aguardando conexão…</div>
+    </div>
+    <div class="run-bar" id="run-bar" hidden data-state="queued">
+      <span class="run-orb" aria-hidden="true"></span>
+      <div class="run-main">
+        <div class="run-top"><strong id="run-title">Análise</strong><span class="run-stage" id="run-stage">Na fila do servidor…</span><span class="run-pct" id="run-pct">0%</span></div>
+        <div class="run-track"><i id="run-fill"></i></div>
+        <div class="run-hint tiny muted" id="run-hint">Roda no servidor: pode fechar esta página e acompanhar depois aqui ou em Relatórios.</div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" id="btn-cancel">■ Cancelar</button>
     </div>
     <div class="telemetry">
       <div class="odo"><span class="odo-v" data-odo="tables">0</span><span class="odo-l">tabelas</span></div>

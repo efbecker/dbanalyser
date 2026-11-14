@@ -16,12 +16,12 @@
     <thead><tr><th>#</th><th>Alvo</th><th>Banco</th><th>Score</th><th>Status</th><th>Data</th></tr></thead>
     <tbody>
     <?php foreach ($recent as $r): ?>
-      <tr>
+      <tr<?= $r['status'] === 'running' ? ' class="row-live"' : '' ?>>
         <td><a href="<?= e(url('/reports/' . $r['id'])) ?>">#<?= (int) $r['id'] ?></a></td>
         <td><span class="engine engine-<?= e($r['engine']) ?>"><?= e($r['engine']) ?></span> <?= e($r['host']) ?></td>
         <td><?= e($r['database_name']) ?></td>
         <td><?php if ($r['score'] !== null): ?><span class="score score-<?= $r['score'] >= 80 ? 'good' : ($r['score'] >= 50 ? 'warn' : 'bad') ?>"><?= (int) $r['score'] ?></span><?php endif; ?></td>
-        <td><span class="status status-<?= e($r['status']) ?>"><?= e($r['status']) ?></span></td>
+        <td><?php if ($r['status'] === 'running'): ?><?= live_progress($r) ?><?php else: ?><span class="status status-<?= e($r['status']) ?>"><?= e($r['status']) ?></span><?php endif; ?></td>
         <td class="muted"><?= e($r['started_at']) ?> UTC</td>
       </tr>
     <?php endforeach; ?>

@@ -430,68 +430,226 @@
     form.ssh_password.value = ''; form.ssh_key.value = ''; form.ssh_passphrase.value = ''; form.ssh_sudo_password.value = ''; // não mantém segredos no DOM
   });
 
+  /* ------------------------------------------------------------------ */
+  /* Acompanhamento: a análise roda no servidor; a tela só reproduz       */
+  /* os eventos gravados (pode sair e voltar, ou abrir em outra aba).     */
+  /* ------------------------------------------------------------------ */
+  const runBar = $('#run-bar');
+  const runTitle = $('#run-title');
+  const runStage = $('#run-stage');
+  const runPct = $('#run-pct');
+  const runFill = $('#run-fill');
+  const btnCancel = $('#btn-cancel');
+  const runHint = $('#run-hint');
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  let watch = null;
+
+  function stagePhase(stage, label) {
+    if (stage === 'connect') setPhase('connecting', '⟲ Conectando em modo somente leitura');
+    else if (stage === 'ai') setPhase('ai');
+    else if (stage === 'report') setPhase('scanning', '✎ Gerando laudo técnico');
+    else setPhase('scanning', '⟟ ' + label);
+  }
+
+  function applyCounters(c) {
+    if (c.tables !== undefined) bump('tables', c.tables);
+    if (c.fks !== undefined) bump('fks', c.fks);
+    if (c.indexes !== undefined) bump('indexes', c.indexes);
+    if (c.findings !== undefined) bump('findings', c.findings);
+    if (c.latency !== undefined) animateCount(odo('latency'), c.latency);
+    if (c.score !== undefined) animateCount(odo('score'), c.score);
+  }
+
+  function setBar(r) {
+    const pct = r.status === 'done' ? 100 : r.percent;
+    runPct.textContent = pct + '%';
+    runFill.style.width = pct + '%';
+    runBar.dataset.state = r.status === 'running' ? (r.cancelling ? 'cancelling' : r.queued ? 'queued' : 'running') : r.status;
+    runTitle.textContent = `Análise #${r.id} · ${r.database} @ ${r.host}`;
+    runStage.textContent = r.status === 'done' ? 'Concluída'
+      : r.status === 'failed' ? (r.error === 'Cancelada pelo usuário' ? 'Cancelada' : 'Falhou')
+      : r.cancelling ? 'Cancelando após a etapa atual…'
+      : r.queued ? 'Na fila do servidor…' : r.stage_label;
+    btnCancel.hidden = r.status !== 'running';
+    btnCancel.disabled = !!r.cancelling;
+    runHint.hidden = r.status !== 'running';
+  }
+
+  function enterStage(w, stage) {
+    const li = stageEl(stage);
+    li.className = 'running';
+    w.shownAt[stage] = performance.now();
+    out(`→ [${w.labels[stage]}]`);
+    stagePhase(stage, w.labels[stage]);
+  }
+
+  function finishStage(stage, ms) {
+    const li = stageEl(stage);
+    li.className = 'done';
+    li.querySelector('.st-time').textContent = ms == null ? '' : (ms / 1000).toFixed(1) + 's';
+  }
+
+  // Cronômetro da etapa corrente (útil na IA, que pode levar minutos)
+  setInterval(() => {
+    if (!watch) return;
+    for (const [stage, t] of Object.entries(watch.shownAt)) {
+      const li = stageEl(stage);
+      if (li && li.className === 'running') li.querySelector('.st-time').textContent = Math.floor((performance.now() - t) / 1000) + 's';
+    }
+  }, 500);
+
+  function endWatch(w) {
+    w.ended = true;
+    btnStart.disabled = !dbSelect.value;
+    btnList.disabled = false;
+  }
+
+  async function play(w) {
+    if (w.playing) return;
+    w.playing = true;
+    while (w.events.length && !w.stop) {
+      const e = w.events.shift();
+      const rush = w.events.length > 30; // atraso acumulado (aba em segundo plano): acelera
+      if (e.k === 'log') out(e.t, e.c || '');
+      else if (e.k === 'counters') applyCounters(e.c);
+      else if (e.k === 'graph' && w.graph) setGraph(w.graph);
+      else if (e.k === 'stage' && e.state === 'running') enterStage(w, e.stage);
+      else if (e.k === 'stage' && e.state === 'done') {
+        if (e.stage === 'connect') setPhase('connected');
+        await waitTerminal();
+        // ritmo mínimo por etapa para que a varredura seja legível mesmo em bancos pequenos
+        const min = rush ? 150 : e.stage === 'schemas' ? 2600 : 1100;
+        await sleep(Math.max(0, min - (performance.now() - (w.shownAt[e.stage] || 0))));
+        delete w.shownAt[e.stage];
+        finishStage(e.stage, e.ms);
+      } else if (e.k === 'stage' && e.state === 'error') {
+        stageEl(e.stage).className = 'error';
+        delete w.shownAt[e.stage];
+      } else if (e.k === 'error') {
+        await waitTerminal();
+        setPhase('error');
+        scene.shake = 14;
+        out('✘ ' + e.msg);
+        endWatch(w);
+      } else if (e.k === 'cancelled') {
+        await waitTerminal();
+        Object.keys(w.shownAt).forEach((s) => { stageEl(s).className = ''; });
+        setPhase('error', '■ Análise cancelada');
+        out('■ Análise cancelada pelo usuário. Nenhuma etapa seguinte foi executada.', 't-warn');
+        endWatch(w);
+      } else if (e.k === 'done') {
+        await waitTerminal();
+        setPhase('done');
+        out('✔ Concluído. Abrindo laudo…');
+        endWatch(w);
+        await sleep(2200);
+        if (watch === w && !w.stop) location.href = e.url;
+      }
+    }
+    w.playing = false;
+  }
+
+  // Retomada: aplica o estado atual de uma vez (etapas concluídas, grafo, contadores e o fim do log)
+  function restore(w, r) {
+    resetStages();
+    scene.engine = r.engine;
+    out(`oraculo@analyzer:~$ attach --analysis=${r.id}   # análise rodando no servidor`, 't-dim');
+    if (r.graph) setGraph(r.graph);
+    for (const [k, st] of Object.entries(r.stages)) {
+      if (st.state === 'done') finishStage(k, st.ms);
+      if (st.state === 'error') stageEl(k).className = 'error';
+    }
+    applyCounters(r.counters || {});
+    const logs = r.events.filter((e) => e.k === 'log');
+    if (logs.length > 40) out(`  … ${logs.length - 40} linhas anteriores (o laudo completo fica em Relatórios)`, 't-dim');
+    logs.slice(-40).forEach((e) => out(e.t, e.c || ''));
+    const cur = r.stages[r.stage];
+    if (r.status === 'running' && cur && cur.state === 'running') {
+      stageEl(r.stage).className = 'running';
+      w.shownAt[r.stage] = performance.now() - (cur.elapsed || 0);
+      stagePhase(r.stage, w.labels[r.stage]);
+    } else if (r.status === 'running') {
+      setPhase('connecting', r.queued ? '⧗ Na fila do servidor' : '⟲ Retomando');
+    }
+    const tail = r.events.filter((e) => ['done', 'error', 'cancelled'].includes(e.k));
+    w.events.push(...tail);
+    if (r.status === 'failed' && !tail.length) {
+      setPhase('error');
+      out('✘ ' + (r.error || 'A análise falhou.'));
+      endWatch(w);
+    }
+  }
+
+  async function poll(w, first) {
+    if (w.stop || w.ended) return;
+    const r = await api(`/api/analyzer/progress?id=${w.id}&since=${w.since}`, undefined, 'GET').catch(() => ({ error: 'rede' }));
+    if (w.stop) return;
+    if (!r.status) {
+      // falha de rede ou servidor reiniciando: tenta de novo sem perder o ponto
+      if (r.error && r.error !== 'rede' && first) { out('✘ ' + r.error); runBar.hidden = true; endWatch(w); return; }
+      w.timer = setTimeout(() => poll(w, first), 3000);
+      return;
+    }
+    w.labels = r.stage_labels;
+    if (r.graph) w.graph = r.graph;
+    if (first && w.resume) restore(w, r);
+    else w.events.push(...r.events);
+    w.since = r.seq;
+    setBar(r);
+    play(w);
+    if (r.status === 'running') w.timer = setTimeout(() => poll(w), document.hidden ? 4000 : 800);
+  }
+
+  function startWatch(id, resume) {
+    if (watch) { watch.stop = true; clearTimeout(watch.timer); }
+    const w = watch = { id, resume, since: 0, events: [], shownAt: {}, labels: {}, graph: null, stop: false, ended: false, playing: false };
+    runBar.hidden = false;
+    btnStart.disabled = true;
+    btnCancel.disabled = false;
+    runFill.style.width = '0%';
+    if (history.replaceState) history.replaceState(null, '', `${location.pathname}?watch=${id}`);
+    poll(w, true);
+  }
+
+  // Voltou para a aba: busca logo, sem esperar o intervalo lento
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && watch && !watch.ended && !watch.stop) { clearTimeout(watch.timer); poll(watch); }
+  });
+
+  btnCancel.addEventListener('click', async () => {
+    if (!watch) return;
+    btnCancel.disabled = true;
+    runStage.textContent = 'Cancelando após a etapa atual…';
+    const r = await api('/api/analyzer/cancel', { id: watch.id });
+    if (r.error) { out('✘ ' + r.error); btnCancel.disabled = false; return; }
+    out('• Cancelamento solicitado: o servidor para antes da próxima etapa.', 't-warn');
+    clearTimeout(watch.timer);
+    poll(watch);
+  });
+
   btnStart.addEventListener('click', async () => {
     const data = payload();
     if (!data.database) return;
     btnStart.disabled = true;
     btnList.disabled = true;
-    resetStages();
-    out(`oraculo@analyzer:~$ analyze --database=${data.database} --safe-mode`, 't-dim');
+    out(`oraculo@analyzer:~$ analyze --database=${data.database} --safe-mode --background`, 't-dim');
     if (data.ssh_enabled && !sshTested && !data.ssh_password && !data.ssh_key) {
       out('✘ Coleta via SSH marcada: informe a senha/chave SSH ou clique em "Testar SSH".');
       btnStart.disabled = false; btnList.disabled = false;
       return;
     }
     const s = await api('/api/analyzer/start', data);
-    if (s.error) { out('✘ ' + s.error); btnList.disabled = false; return; }
-
-    for (const stage of Object.keys(s.stages)) {
-      const li = stageEl(stage);
-      li.className = 'running';
-      out(`→ [${s.stages[stage]}]`);
-      if (stage === 'connect') setPhase('connecting', '⟲ Reconectando em modo somente leitura');
-      if (['schemas', 'indexes', 'queries', 'sizing', 'os', 'vulns'].includes(stage)) setPhase('scanning', '⟟ ' + s.stages[stage]);
-      if (stage === 'ai') setPhase('ai');
-      if (stage === 'report') setPhase('scanning', '✎ Gerando laudo técnico');
-
-      const t0 = performance.now();
-      const r = await api('/api/analyzer/step', { id: s.id, stage });
-      if (r.error) {
-        li.className = 'error';
-        setPhase('error');
-        scene.shake = 14;
-        out('✘ ' + r.error);
-        btnList.disabled = false;
-        btnStart.disabled = false;
-        return;
-      }
-      const lines = r.log || [];
-      lines.slice(0, 120).forEach((l) => out(l));
-      if (lines.length > 120) out(`  … +${lines.length - 120} linhas`, 't-dim');
-
-      const c = r.counters || {};
-      if (c.tables !== undefined) bump('tables', c.tables);
-      if (c.fks !== undefined) bump('fks', c.fks);
-      if (c.indexes !== undefined) bump('indexes', c.indexes);
-      if (r.findings) bump('findings', counters.findings + r.findings);
-      if (c.score !== undefined) animateCount(odo('score'), c.score);
-      if (stage === 'connect') setPhase('connected');
-      if (r.graph) setGraph(r.graph);
-
-      await waitTerminal();
-      // ritmo mínimo por etapa para que a varredura seja legível mesmo em bancos pequenos
-      const minMs = stage === 'schemas' ? 2600 : 1100;
-      await new Promise((res) => setTimeout(res, Math.max(0, minMs - (performance.now() - t0))));
-      li.className = 'done';
-      li.querySelector('.st-time').textContent = (r.elapsed_ms / 1000).toFixed(1) + 's';
-
-      if (stage === 'report') {
-        setPhase('done');
-        out(`✔ Concluído. Abrindo laudo…`);
-        setTimeout(() => { location.href = r.url; }, 2200);
-      }
-    }
+    btnList.disabled = false;
+    if (s.error) { out('✘ ' + s.error); btnStart.disabled = false; return; }
+    resetStages();
+    out(`• Análise #${s.id} enfileirada no servidor: pode sair desta página, ela continua rodando.`);
+    startWatch(s.id, false);
   });
+
+  if (canvas.dataset.watch) {
+    scene.engine = canvas.dataset.engine || scene.engine;
+    startWatch(Number(canvas.dataset.watch), true);
+  }
 
   resize();
   frame();

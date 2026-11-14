@@ -68,3 +68,16 @@ function client_ip(): string
     }
     return $ip;
 }
+
+/** Célula "em andamento" de uma análise (anel + etapa + %), atualizada ao vivo pelo app.js. */
+function live_progress(array $a): string
+{
+    $s = App\Analyzer\Runner::summary($a);
+    $state = $s['cancelling'] ? 'cancelling' : ($s['queued'] ? 'queued' : 'running');
+    $label = $s['cancelling'] ? 'Cancelando' : ($s['queued'] ? 'Na fila' : $s['stage_label']);
+    return sprintf(
+        '<a class="live" href="%s" data-live-id="%d" data-state="%s" style="--p:%d" title="Acompanhar a análise ao vivo"><span class="live-ring"></span>'
+        . '<span class="live-txt"><span>%s</span><b>%d%%</b></span><span class="live-track"><i style="width:%d%%"></i></span></a>',
+        e(url('/analyzer?watch=' . $s['id'])), $s['id'], $state, $s['percent'], e($label), $s['percent'], $s['percent']
+    );
+}

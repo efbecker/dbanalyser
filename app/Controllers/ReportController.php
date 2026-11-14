@@ -27,7 +27,7 @@ final class ReportController
             $where .= ' AND (a.host LIKE :q OR a.database_name LIKE :q OR a.engine LIKE :q)';
             $p['q'] = "%$q%";
         }
-        $rows = Database::all("SELECT a.id, a.engine, a.host, a.port, a.database_name, a.score, a.status, a.ai_model, a.error, u.username,
+        $rows = Database::all("SELECT a.id, a.engine, a.host, a.port, a.database_name, a.score, a.status, a.ai_model, a.error, a.current_stage, a.progress_json, a.worker_pid, a.heartbeat_at, a.cancel_requested, a.started_at, u.username,
                                       datetime(a.started_at, 'localtime') AS started
                                  FROM analyses a JOIN users u ON u.id = a.user_id WHERE $where ORDER BY a.id DESC LIMIT 300", $p);
         View::render('reports/index', ['title' => 'Relatórios', 'rows' => $rows, 'q' => $q]);
@@ -36,6 +36,9 @@ final class ReportController
     public function show(string $id): void
     {
         $a = $this->find((int) $id);
+        if ($a['status'] === 'running') {
+            Http::redirect('/analyzer?watch=' . $a['id']); // ainda rodando: acompanha a animação ao vivo
+        }
         $prev = Database::one("SELECT id, score, datetime(started_at,'localtime') AS started FROM analyses WHERE host = ? AND port = ? AND database_name = ? AND id < ? AND status = 'done' ORDER BY id DESC LIMIT 1",
             [$a['host'], $a['port'], $a['database_name'], $a['id']]);
         View::render('reports/show', ['title' => 'Laudo #' . $a['id'], 'a' => $a, 'prev' => $prev] + self::decode($a));

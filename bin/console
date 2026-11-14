@@ -14,13 +14,16 @@ declare(strict_types=1);
  *   php bin/console vulndb:update [--url=URL]           baixa a base de CVEs/EOL mais recente (o laudo funciona offline sem ela)
  *   php bin/console vulndb:status                       mostra a data da base de vulnerabilidades em uso
  *   php bin/console vulndb:check <motor> <versão>       ex.: vulndb:check postgresql 16.2
+ *   php bin/console worker [--max=3]                    serviço que executa as análises em segundo plano (systemd: db-analyzer-worker)
+ *   php bin/console analysis:run <id>                   executa/retoma uma análise da fila (disparado pelo worker ou pela web)
+ *   php bin/console analysis:list                       análises em andamento e o progresso de cada uma
  */
 if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 require dirname(__DIR__) . '/app/bootstrap.php';
 
-use App\Analyzer\VulnCheck;
+use App\Analyzer\{Runner, VulnCheck};
 use App\Core\{Audit, Auth, Crypto, Database};
 
 $args = array_slice($argv, 1);
@@ -133,6 +136,55 @@ switch ($cmd) {
         foreach ($r['findings'] as $f) {
             echo PHP_EOL . '[' . strtoupper($f['severity']) . "] {$f['title']}\n{$f['detail']}\n";
         }
+        break;
+
+    case 'analysis:run':
+        $id = (int) ($pos[0] ?? 0);
+        if ($id <= 0) {
+            fwrite(STDERR, "Informe o id da análise.\n");
+            exit(1);
+        }
+        exit(Runner::run($id));
+
+    case 'analysis:list':
+        $rows = Database::all("SELECT * FROM analyses WHERE status = 'running' ORDER BY id");
+        if (!$rows) {
+            echo "Nenhuma análise em andamento.\n";
+        }
+        foreach ($rows as $a) {
+            $s = Runner::summary($a);
+            printf("#%d  %3d%%  %-28s %s/%s  pid=%s%s\n", $s['id'], $s['percent'], $s['stage_label'], $a['host'], $a['database_name'],
+                $a['worker_pid'] ?: '-', $s['stale'] ? '  (sem batimento)' : ($s['queued'] ? '  (na fila)' : ''));
+        }
+        echo 'Worker: ' . (Runner::workerAlive() ? 'ativo' : 'parado') . PHP_EOL;
+        break;
+
+    case 'worker':
+        // Laço leve: a cada segundo grava o batimento e lança runners (processos separados) para análises na fila
+        // ou órfãs. Com KillMode=process no systemd, reiniciar o worker não interrompe análises em execução.
+        $max = max(1, (int) ($opt['max'] ?? \App\Core\Config::get('worker_concurrency', 3)));
+        $stop = false;
+        if (function_exists('pcntl_async_signals')) {
+            pcntl_async_signals(true);
+            pcntl_signal(SIGTERM, function () use (&$stop) { $stop = true; });
+            pcntl_signal(SIGINT, function () use (&$stop) { $stop = true; });
+        }
+        echo "db-analyzer worker iniciado (até $max análises simultâneas).\n";
+        while (!$stop) {
+            try {
+                if ($n = Runner::tick($max)) {
+                    echo gmdate('c') . " $n análise(s) despachada(s)\n";
+                }
+            } catch (\Throwable $e) {
+                fwrite(STDERR, gmdate('c') . ' ' . $e->getMessage() . PHP_EOL);
+            }
+            sleep(1);
+            if (function_exists('pcntl_waitpid')) {
+                while (pcntl_waitpid(-1, $st, WNOHANG) > 0) {
+                }
+            }
+        }
+        echo "worker encerrado.\n";
         break;
 
     default:

@@ -4,7 +4,8 @@ declare(strict_types=1);
 namespace App\Core;
 
 /**
- * Roteador mínimo. Opções por rota: auth (bool), role ('ADMIN'), csrf (bool, padrão true em POST).
+ * Roteador mínimo. Opções por rota: auth (bool), role ('ADMIN'), csrf (bool, padrão true em POST),
+ * session ('write' para APIs que gravam na sessão; as demais liberam o lock da sessão antes do handler).
  */
 final class Router
 {
@@ -54,6 +55,11 @@ final class Router
             if ($method === 'POST' && ($opts['csrf'] ?? true) && !Csrf::check()) {
                 $isApi ? Http::json(['error' => 'Token CSRF inválido'], 419) : View::render('errors/403', ['message' => 'Formulário expirado. Recarregue a página.'], 419);
                 return;
+            }
+            // APIs não precisam gravar sessão: libera o lock para que o acompanhamento (polling) não espere
+            // outras requisições da mesma sessão. Rotas que gravam na sessão declaram 'session' => 'write'.
+            if ($isApi && ($opts['session'] ?? 'read') !== 'write' && session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
             }
             if (is_array($handler)) {
                 [$class, $fn] = $handler;

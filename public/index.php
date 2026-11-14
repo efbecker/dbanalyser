@@ -33,10 +33,12 @@ $r->get('/', [DashboardController::class, 'index']);
 
 // Analisador
 $r->get('/analyzer', [AnalyzerController::class, 'index']);
-$r->post('/api/analyzer/databases', [AnalyzerController::class, 'listDatabases']);
-$r->post('/api/analyzer/start', [AnalyzerController::class, 'start']);
-$r->post('/api/analyzer/step', [AnalyzerController::class, 'step']);
-$r->post('/api/analyzer/ssh', [AnalyzerController::class, 'testSsh']);
+$r->post('/api/analyzer/databases', [AnalyzerController::class, 'listDatabases'], ['session' => 'write']);
+$r->post('/api/analyzer/start', [AnalyzerController::class, 'start'], ['session' => 'write']);
+$r->post('/api/analyzer/ssh', [AnalyzerController::class, 'testSsh'], ['session' => 'write']);
+$r->get('/api/analyzer/progress', [AnalyzerController::class, 'progress']);
+$r->get('/api/analyzer/running', [AnalyzerController::class, 'running']);
+$r->post('/api/analyzer/cancel', [AnalyzerController::class, 'cancel']);
 
 // Relatórios
 $r->get('/reports', [ReportController::class, 'index']);

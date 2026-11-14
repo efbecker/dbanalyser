@@ -11,6 +11,9 @@ use App\Core\{Config, Crypto, Database};
  */
 final class AiClient
 {
+    /** Chamado ~1x/s durante a requisição; devolver true aborta (cancelamento da análise em segundo plano). */
+    public ?\Closure $abort = null;
+
     public const PROVIDERS = [
         'openai'    => ['label' => 'OpenAI',             'model' => 'gpt-4.1-mini',             'base' => 'https://api.openai.com/v1',                         'key' => true],
         'anthropic' => ['label' => 'Anthropic Claude',   'model' => 'claude-opus-5-5',           'base' => 'https://api.anthropic.com/v1',                      'key' => true],
@@ -173,10 +176,25 @@ final class AiClient
             CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_PROTOCOLS      => CURLPROTO_HTTP | CURLPROTO_HTTPS,
         ]);
+        $aborted = false;
+        if ($this->abort) {
+            $last = 0.0;
+            curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+            curl_setopt($ch, CURLOPT_XFERINFOFUNCTION, function () use (&$last, &$aborted): int {
+                if (microtime(true) - $last < 1) {
+                    return 0;
+                }
+                $last = microtime(true);
+                return ($aborted = (bool) ($this->abort)()) ? 1 : 0;
+            });
+        }
         $raw = curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         $err = curl_error($ch);
         curl_close($ch);
+        if ($raw === false && $aborted) {
+            throw new \RuntimeException('Requisição à IA interrompida: análise cancelada.');
+        }
         if ($raw === false) {
             throw new \RuntimeException('Falha de rede ao contatar a IA: ' . $err);
         }

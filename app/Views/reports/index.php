@@ -8,7 +8,7 @@
     <tbody>
     <?php if (!$rows): ?><tr><td colspan="11" class="muted center">Nenhuma análise encontrada.</td></tr><?php endif; ?>
     <?php foreach ($rows as $r): ?>
-      <tr>
+      <tr<?= $r['status'] === 'running' ? ' class="row-live"' : '' ?>>
         <td><?php if ($r['status'] === 'done'): ?><input type="checkbox" class="cmp" value="<?= (int) $r['id'] ?>"><?php endif; ?></td>
         <td><a href="<?= e(url('/reports/' . $r['id'])) ?>">#<?= (int) $r['id'] ?></a></td>
         <td class="small nowrap"><?= e($r['started']) ?></td>
@@ -16,7 +16,7 @@
         <td class="small"><?= e($r['host'] . ':' . $r['port']) ?></td>
         <td><?= e($r['database_name']) ?></td>
         <td><?php if ($r['score'] !== null): ?><span class="score score-<?= $r['score'] >= 80 ? 'good' : ($r['score'] >= 50 ? 'warn' : 'bad') ?>"><?= (int) $r['score'] ?></span><?php endif; ?></td>
-        <td><span class="status status-<?= e($r['status']) ?>" title="<?= e($r['error'] ?? '') ?>"><?= e($r['status']) ?></span></td>
+        <td><?php if ($r['status'] === 'running'): ?><?= live_progress($r) ?><?php else: ?><span class="status status-<?= e($r['status']) ?>" title="<?= e($r['error'] ?? '') ?>"><?= e($r['error'] === 'Cancelada pelo usuário' ? 'cancelada' : $r['status']) ?></span><?php endif; ?></td>
         <td class="small muted"><?= e($r['ai_model'] ?? '—') ?></td>
         <?php if (($user['role'] ?? '') === 'ADMIN'): ?><td class="small"><?= e($r['username']) ?></td><?php endif; ?>
         <td class="right nowrap">

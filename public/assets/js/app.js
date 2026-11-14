@@ -160,3 +160,65 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
+
+/* Análises em andamento: indicador lateral e células ao vivo em Relatórios/Painel */
+(() => {
+  const pill = document.getElementById('nav-live');
+  if (!pill) return;
+  const known = new Set([...document.querySelectorAll('[data-live-id]')].map((el) => +el.dataset.liveId));
+  let timer = null;
+  let reloadAt = 0;
+
+  function paintCell(el, s) {
+    const state = s.cancelling ? 'cancelling' : s.queued ? 'queued' : 'running';
+    el.dataset.state = state;
+    el.style.setProperty('--p', s.percent);
+    el.querySelector('.live-txt span').textContent = s.cancelling ? 'Cancelando' : s.queued ? 'Na fila' : s.stage_label;
+    el.querySelector('.live-txt b').textContent = s.percent + '%';
+    el.querySelector('.live-track i').style.width = s.percent + '%';
+  }
+
+  function finishCell(el, f) {
+    const tr = el.closest('tr');
+    const label = f.error === 'Cancelada pelo usuário' ? 'cancelada' : f.status;
+    el.outerHTML = `<span class="status status-${esc(f.status)}" title="${esc(f.error || '')}">${esc(label)}</span>`;
+    if (tr) {
+      tr.classList.remove('row-live');
+      tr.classList.add('row-flash');
+    }
+    known.delete(f.id);
+    reloadAt = Date.now() + 1800; // recarrega para trazer score, exportações e comparação
+  }
+
+  async function tick() {
+    clearTimeout(timer);
+    if (document.hidden) { timer = setTimeout(tick, 5000); return; }
+    const r = await api('/api/analyzer/running?ids=' + [...known].join(','), undefined, 'GET').catch(() => null);
+    if (r && r.items) {
+      const items = r.items;
+      pill.hidden = !items.length;
+      if (items.length) {
+        const s = items[0];
+        document.getElementById('nav-live-count').textContent = items.length === 1 ? '1 análise em andamento' : `${items.length} análises em andamento`;
+        document.getElementById('nav-live-pct').textContent = s.percent + '%';
+        document.getElementById('nav-live-sub').textContent = `#${s.id} · ${s.database} · ${s.queued ? 'na fila' : s.stage_label}`;
+        document.getElementById('nav-live-fill').style.width = s.percent + '%';
+        pill.href = pill.dataset.base + (items.length === 1 ? '/analyzer?watch=' + s.id : '/reports');
+      }
+      for (const s of items) {
+        document.querySelectorAll(`[data-live-id="${s.id}"]`).forEach((el) => paintCell(el, s));
+      }
+      for (const f of r.finished || []) {
+        document.querySelectorAll(`[data-live-id="${f.id}"]`).forEach((el) => finishCell(el, f));
+      }
+      if (reloadAt && Date.now() >= reloadAt) { location.reload(); return; }
+      if (reloadAt) { timer = setTimeout(tick, Math.max(200, reloadAt - Date.now())); return; }
+      timer = setTimeout(tick, items.length ? 2500 : 20000);
+      return;
+    }
+    timer = setTimeout(tick, 8000);
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+  // Na tela do analisador quem acompanha é o analyzer.js; aqui só o indicador lateral, mais espaçado
+  timer = setTimeout(tick, pill.hidden && !known.size ? 20000 : 2500);
+})();
