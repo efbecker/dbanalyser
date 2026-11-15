@@ -48,7 +48,8 @@ $live0 = $liveRuns ? App\Analyzer\Runner::summary($liveRuns[0]) : null;
     </nav>
     <a class="nav-live" id="nav-live" href="<?= e(url($live0 && count($liveRuns) === 1 ? '/analyzer?watch=' . $live0['id'] : '/reports')) ?>" data-base="<?= e(url('')) ?>"<?= $live0 ? '' : ' hidden' ?>>
       <span class="nav-live-top"><span class="nav-live-dot"></span><span id="nav-live-count"><?= count($liveRuns) === 1 ? '1 análise em andamento' : count($liveRuns) . ' análises em andamento' ?></span><b id="nav-live-pct"><?= (int) ($live0['percent'] ?? 0) ?>%</b></span>
-      <span class="nav-live-sub" id="nav-live-sub"><?= $live0 ? e('#' . $live0['id'] . ' · ' . $live0['database'] . ' · ' . $live0['stage_label']) : '' ?></span>
+      <span class="nav-live-sub" id="nav-live-sub"><?= $live0 ? e('#' . $live0['id'] . ' · ' . $live0['database']) : '' ?></span>
+      <span class="nav-live-stage" id="nav-live-stage"><?= $live0 ? e($live0['queued'] ? 'Na fila' : $live0['stage_label']) : '' ?></span>
       <span class="live-track"><i id="nav-live-fill" style="width:<?= (int) ($live0['percent'] ?? 0) ?>%"></i></span>
     </a>
     <div class="sidebar-foot">

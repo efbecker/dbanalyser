@@ -201,7 +201,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const s = items[0];
         document.getElementById('nav-live-count').textContent = items.length === 1 ? '1 análise em andamento' : `${items.length} análises em andamento`;
         document.getElementById('nav-live-pct').textContent = s.percent + '%';
-        document.getElementById('nav-live-sub').textContent = `#${s.id} · ${s.database} · ${s.queued ? 'na fila' : s.stage_label}`;
+        document.getElementById('nav-live-sub').textContent = `#${s.id} · ${s.database}`;
+        document.getElementById('nav-live-stage').textContent = s.cancelling ? 'Cancelando' : s.queued ? 'Na fila' : s.stage_label;
         document.getElementById('nav-live-fill').style.width = s.percent + '%';
         pill.href = pill.dataset.base + (items.length === 1 ? '/analyzer?watch=' + s.id : '/reports');
       }

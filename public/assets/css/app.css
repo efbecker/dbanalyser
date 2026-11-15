@@ -219,7 +219,7 @@ details > summary { list-style: none; } details > summary::-webkit-details-marke
 .run-main { flex: 1; min-width: 0; }
 .run-top { display: flex; align-items: baseline; gap: 10px; font-size: .86rem; }
 .run-top strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.run-stage { color: var(--st); font: 600 .74rem var(--mono); letter-spacing: .8px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-stage { min-width: 0; color: var(--st); font: 600 .74rem var(--mono); letter-spacing: .8px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .run-pct { margin-left: auto; font: 700 1rem var(--mono); color: var(--st); font-variant-numeric: tabular-nums; text-shadow: 0 0 10px color-mix(in srgb, var(--st) 60%, transparent); }
 .run-track, .live-track { display: block; position: relative; height: 5px; margin: 7px 0 5px; background: #1a2232; border-radius: 3px; overflow: hidden; }
 .run-track i, .live-track i { position: relative; display: block; height: 100%; width: 0; border-radius: 3px; overflow: hidden;
@@ -237,7 +237,7 @@ details > summary { list-style: none; } details > summary::-webkit-details-marke
 @keyframes breathe { 50% { opacity: .35; transform: scale(.8); } }
 
 /* célula de progresso ao vivo (Relatórios / Painel) */
-.live { --st: var(--accent); display: inline-grid; grid-template-columns: 26px minmax(110px, 170px); gap: 0 9px; align-items: center; vertical-align: middle; }
+.live { --st: var(--accent); display: inline-grid; grid-template-columns: 26px minmax(140px, 190px); gap: 0 9px; align-items: center; vertical-align: middle; }
 .live[data-state="queued"] { --st: #7aa7c7; } .live[data-state="cancelling"] { --st: var(--warn); }
 .live-ring { grid-row: span 2; width: 26px; height: 26px; border-radius: 50%; position: relative;
   background: conic-gradient(var(--st) calc(var(--p, 0) * 1%), #1a2232 0); transition: --p .8s;
@@ -245,9 +245,9 @@ details > summary { list-style: none; } details > summary::-webkit-details-marke
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--st) 70%, transparent)); }
 .live-ring::after { content: ""; position: absolute; inset: 0; border-radius: 50%; animation: spin 1.2s linear infinite;
   background: conic-gradient(from 0deg, transparent 0 82%, rgba(255, 255, 255, .55) 100%); }
-.live-txt { display: flex; gap: 8px; font: 600 .7rem var(--mono); letter-spacing: .6px; text-transform: uppercase; color: var(--st); white-space: nowrap; }
+.live-txt { display: flex; align-items: flex-start; gap: 8px; font: 600 .68rem var(--mono); letter-spacing: .3px; text-transform: uppercase; color: var(--st); white-space: nowrap; }
 .live-txt b { margin-left: auto; font-variant-numeric: tabular-nums; }
-.live-txt span { overflow: hidden; text-overflow: ellipsis; }
+.live-txt span { min-width: 0; white-space: normal; line-height: 1.3; }
 .live .live-track { margin: 3px 0 0; height: 3px; }
 @property --p { syntax: "<number>"; inherits: true; initial-value: 0; }
 tr.row-live { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 6%, transparent), transparent 70%); }
@@ -264,6 +264,8 @@ tr.row-flash td { animation: rowflash 1.4s ease-out; }
 .nav-live-top { display: flex; align-items: center; gap: 8px; }
 .nav-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: breathe 1.4s ease-in-out infinite; }
 .nav-live-top b { margin-left: auto; font: 700 .78rem var(--mono); color: var(--accent); }
+.nav-live-sub, .nav-live-stage { display: block; min-width: 0; }
+.nav-live-stage { margin-top: 1px; font: 600 .7rem var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: .5px; overflow-wrap: anywhere; }
 .nav-live-sub { margin-top: 2px; font: .68rem var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav-live .live-track { margin: 6px 0 0; height: 3px; }
 @media (prefers-reduced-motion: reduce) { .run-orb, .live-ring::after, .nav-live-dot, .run-track i::after, .live-track i::after { animation: none; } }
